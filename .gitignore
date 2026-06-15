@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Secrets / local
+.env
+*.token
+hf_token*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Gradio
+.gradio/
+flagged/
