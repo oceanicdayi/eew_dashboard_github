@@ -367,7 +367,7 @@ with gr.Blocks(title="EEW Dashboard") as demo:
         wm = gr.Markdown(f"波形圖來源：`{WAVEFORM_DATASET_ID}/{WAVEFORM_IMAGE_PATH}`")
         wp = gr.Button("載入波形圖")
         wave_msg = gr.Markdown()
-        wave_img = gr.Image(label="TSMIP HLZ 3-minute clusters", type="filepath", show_download_button=True)
+        wave_img = gr.Image(label="TSMIP HLZ 3-minute clusters", type="filepath")
         wp.click(render_waveform_image, outputs=[wave_msg, wave_img])
         demo.load(render_waveform_image, outputs=[wave_msg, wave_img])
 
