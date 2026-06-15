@@ -96,7 +96,7 @@ def load_status(source):
 
 def level(text):
     t = str(text).lower()
-    if any(k in t for k in ["up", "ok", "running", "healthy", "success", "available", "exists", "運行", "正常"]):
+    if any(k in t for k in ["alive", "up", "ok", "running", "healthy", "success", "available", "exists", "運行", "正常"]):
         return "ok"
     if any(k in t for k in ["warn", "warning", "partial", "degraded", "警告"]):
         return "warn"
@@ -113,7 +113,7 @@ def module_items(payload):
         if isinstance(value, dict):
             for name, info in value.items():
                 if isinstance(info, dict):
-                    status = info.get("status") or info.get("state") or info.get("health") or info.get("ok") or "unknown"
+                    status = info.get("status") or info.get("state") or info.get("health") or info.get("alive") or info.get("ok") or "unknown"
                 else:
                     status = info
                 rows.append((str(name), str(status)))
@@ -121,7 +121,7 @@ def module_items(payload):
             for i, info in enumerate(value):
                 if isinstance(info, dict):
                     name = info.get("name") or info.get("module") or info.get("container") or f"module_{i+1}"
-                    status = info.get("status") or info.get("state") or info.get("health") or "unknown"
+                    status = info.get("status") or info.get("state") or info.get("health") or info.get("alive") or "unknown"
                     rows.append((str(name), str(status)))
     header = payload.get("latest_rep_header") or {}
     if isinstance(header, dict) and header.get("file"):
@@ -255,66 +255,99 @@ def demo_series():
     return series
 
 
+def trace_stats(label, y):
+    n = len(y)
+    mean = sum(y) / n if n else 0
+    var = sum((v - mean) ** 2 for v in y) / n if n else 0
+    rms = math.sqrt(sum(v * v for v in y) / n) if n else 0
+    return {
+        "trace": label,
+        "samples": n,
+        "min": round(min(y), 6) if n else None,
+        "max": round(max(y), 6) if n else None,
+        "mean": round(mean, 6),
+        "std": round(math.sqrt(var), 6),
+        "rms": round(rms, 6),
+        "peak_to_peak": round((max(y) - min(y)), 6) if n else None,
+    }
+
+
 def plot_waveform(source):
     try:
         series, label = load_waveform(source)
-        msg = f"✅ 已載入 {label}，10 條波線分開畫，one column。"
+        msg = f"✅ 已載入 {label}，alive 狀態會亮綠燈；波形分開繪製並附統計資訊。"
     except Exception as e:
         series, label = demo_series(), "demo://synthetic fallback"
         msg = f"⚠️ 遠端波形讀取失敗，改顯示示範資料：{e}"
 
     clean = []
+    stats_rows = []
     for item in series[:MAX_TRACES]:
-        y = downsample(floats(item.get("y", [])))
+        raw_y = floats(item.get("y", []))
+        y = downsample(raw_y)
         if len(y) >= 2:
-            clean.append({"label": str(item.get("label") or f"trace_{len(clean)+1}"), "y": y})
+            trace_label = str(item.get("label") or f"trace_{len(clean)+1}")
+            clean.append({"label": trace_label, "y": y})
+            stats_rows.append(trace_stats(trace_label, raw_y))
 
     if not clean:
         fig = go.Figure()
         fig.add_annotation(text="無可繪製的波形資料", x=.5, y=.5, showarrow=False)
         fig.update_layout(height=420, template="plotly_white")
-        return msg, fig
+        return msg, fig, pd.DataFrame([{"status": "no numeric waveform data"}])
 
     rows = min(len(clean), MAX_TRACES)
     fig = make_subplots(
         rows=rows,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.018,
+        vertical_spacing=0.014,
         subplot_titles=[item["label"] for item in clean[:rows]],
     )
     for idx, item in enumerate(clean[:rows], start=1):
         y = item["y"]
+        ymin, ymax = min(y), max(y)
+        pad = max((ymax - ymin) * 0.12, 1e-9)
         fig.add_trace(
             go.Scatter(
                 x=list(range(len(y))),
                 y=y,
                 mode="lines",
                 name=item["label"],
-                line={"width": 1.15},
+                line={"width": 1.6},
+                hovertemplate="sample=%{x}<br>amp=%{y:.6f}<extra></extra>",
                 showlegend=False,
             ),
             row=idx,
             col=1,
         )
-        fig.update_yaxes(title_text=f"T{idx}", showgrid=True, zeroline=False, row=idx, col=1)
+        fig.update_yaxes(
+            title_text=f"T{idx}",
+            showgrid=True,
+            zeroline=True,
+            zerolinewidth=1,
+            zerolinecolor="rgba(30,41,59,0.45)",
+            range=[ymin - pad, ymax + pad],
+            row=idx,
+            col=1,
+        )
 
     fig.update_xaxes(title_text="Samples / time", showgrid=True, zeroline=False, row=rows, col=1)
     fig.update_layout(
         title=f"靜態波形：{label}",
-        height=max(760, rows * 170),
+        height=max(1050, rows * 220),
         template="plotly_white",
-        margin={"l":70,"r":24,"t":72,"b":55},
+        margin={"l":80,"r":28,"t":80,"b":60},
         hovermode="x unified",
     )
-    return msg, fig
+    return msg, fig, pd.DataFrame(stats_rows)
 
 
 status_opts = status_choices()
 wave_opts = waveform_choices()
 
 with gr.Blocks(title="EEW Dashboard") as demo:
-    gr.Markdown("# EEW Dashboard\n系統狀態以亮燈呈現；靜態波形使用 Plotly，10 條波線分開畫、one column。")
+    gr.Markdown("# EEW Dashboard\n系統狀態以亮燈呈現；`alive` 亮綠燈。靜態波形使用 Plotly，10 條波線分開畫、one column，並附統計資訊。")
     with gr.Tab("系統狀態"):
         with gr.Row():
             s = gr.Dropdown(choices=status_opts, value=status_opts[0], label="Status file")
@@ -333,10 +366,11 @@ with gr.Blocks(title="EEW Dashboard") as demo:
             wp = gr.Button("顯示波形")
         wm = gr.Markdown()
         plot = gr.Plot(label="Plotly waveform")
+        stats = gr.Dataframe(label="波形統計資訊", interactive=False)
         wr.click(refresh_waveforms, outputs=[w, wm])
-        wp.click(plot_waveform, inputs=w, outputs=[wm, plot])
-        w.change(plot_waveform, inputs=w, outputs=[wm, plot])
-        demo.load(plot_waveform, inputs=w, outputs=[wm, plot])
+        wp.click(plot_waveform, inputs=w, outputs=[wm, plot, stats])
+        w.change(plot_waveform, inputs=w, outputs=[wm, plot, stats])
+        demo.load(plot_waveform, inputs=w, outputs=[wm, plot, stats])
 
 if __name__ == "__main__":
     demo.launch()
