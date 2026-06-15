@@ -8,6 +8,7 @@ from pathlib import Path
 import gradio as gr
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from huggingface_hub import hf_hub_download, list_repo_files
 
 HERE = Path(__file__).resolve().parent
@@ -257,23 +258,55 @@ def demo_series():
 def plot_waveform(source):
     try:
         series, label = load_waveform(source)
-        msg = f"✅ 已載入 {label}，顯示最多 {MAX_TRACES} 個 trace。"
+        msg = f"✅ 已載入 {label}，10 條波線分開畫，one column。"
     except Exception as e:
         series, label = demo_series(), "demo://synthetic fallback"
         msg = f"⚠️ 遠端波形讀取失敗，改顯示示範資料：{e}"
-    fig = go.Figure()
-    count = 0
+
+    clean = []
     for item in series[:MAX_TRACES]:
         y = downsample(floats(item.get("y", [])))
-        if len(y) < 2:
-            continue
-        fig.add_trace(go.Scatter(x=list(range(len(y))), y=y, mode="lines", name=str(item.get("label") or f"trace_{count+1}"), line={"width": 1.4}))
-        count += 1
-    if count == 0:
+        if len(y) >= 2:
+            clean.append({"label": str(item.get("label") or f"trace_{len(clean)+1}"), "y": y})
+
+    if not clean:
+        fig = go.Figure()
         fig.add_annotation(text="無可繪製的波形資料", x=.5, y=.5, showarrow=False)
-    fig.update_layout(title=f"靜態波形：{label}", height=720, template="plotly_white", margin={"l":55,"r":20,"t":70,"b":55}, xaxis_title="Samples / time", yaxis_title="Amplitude", hovermode="x unified", legend={"orientation":"h","yanchor":"bottom","y":1.02,"xanchor":"left","x":0})
-    fig.update_xaxes(showgrid=True, zeroline=False)
-    fig.update_yaxes(showgrid=True, zeroline=False)
+        fig.update_layout(height=420, template="plotly_white")
+        return msg, fig
+
+    rows = min(len(clean), MAX_TRACES)
+    fig = make_subplots(
+        rows=rows,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.018,
+        subplot_titles=[item["label"] for item in clean[:rows]],
+    )
+    for idx, item in enumerate(clean[:rows], start=1):
+        y = item["y"]
+        fig.add_trace(
+            go.Scatter(
+                x=list(range(len(y))),
+                y=y,
+                mode="lines",
+                name=item["label"],
+                line={"width": 1.15},
+                showlegend=False,
+            ),
+            row=idx,
+            col=1,
+        )
+        fig.update_yaxes(title_text=f"T{idx}", showgrid=True, zeroline=False, row=idx, col=1)
+
+    fig.update_xaxes(title_text="Samples / time", showgrid=True, zeroline=False, row=rows, col=1)
+    fig.update_layout(
+        title=f"靜態波形：{label}",
+        height=max(760, rows * 170),
+        template="plotly_white",
+        margin={"l":70,"r":24,"t":72,"b":55},
+        hovermode="x unified",
+    )
     return msg, fig
 
 
@@ -281,7 +314,7 @@ status_opts = status_choices()
 wave_opts = waveform_choices()
 
 with gr.Blocks(title="EEW Dashboard") as demo:
-    gr.Markdown("# EEW Dashboard\n系統狀態以亮燈呈現；靜態波形使用 Plotly 單欄圖，一次最多 10 個 trace。")
+    gr.Markdown("# EEW Dashboard\n系統狀態以亮燈呈現；靜態波形使用 Plotly，10 條波線分開畫、one column。")
     with gr.Tab("系統狀態"):
         with gr.Row():
             s = gr.Dropdown(choices=status_opts, value=status_opts[0], label="Status file")
