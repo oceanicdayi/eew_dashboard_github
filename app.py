@@ -23,8 +23,8 @@ MAX_TRACES = 10
 MAX_POINTS = 2500
 
 
-def esc(x):
-    return html.escape("" if x is None else str(x))
+def esc(value):
+    return html.escape("" if value is None else str(value))
 
 
 def to_float(value):
@@ -98,12 +98,12 @@ def load_status(source):
             path = hf_hub_download(repo_id=STATUS_DATASET_ID, filename=name, repo_type="dataset")
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f), name
-        except Exception as e:
-            errors.append(str(e))
+        except Exception as exc:
+            errors.append(str(exc))
     raise RuntimeError("; ".join(errors[-2:]))
 
 
-def level(text):
+def status_level(text):
     t = str(text).lower()
     if any(k in t for k in ["alive", "up", "ok", "running", "healthy", "success", "available", "exists", "運行", "正常"]):
         return "ok"
@@ -114,11 +114,7 @@ def level(text):
     return "neutral"
 
 
-def is_alive_status(text):
-    return str(text).strip().lower() == "alive"
-
-
-def normalized_status_from_info(info):
+def normalize_status(info):
     if isinstance(info, dict):
         if "alive" in info or "is_alive" in info:
             value = info.get("alive", info.get("is_alive"))
@@ -129,21 +125,18 @@ def normalized_status_from_info(info):
 
 def module_items(payload):
     rows = []
-    sources = ["containers", "container_status", "container", "docker", "modules", "module_status", "services", "checks"]
-    for key in sources:
+    for key in ["containers", "container_status", "container", "docker", "modules", "module_status", "services", "checks"]:
         value = payload.get(key)
         if isinstance(value, dict):
             for name, info in value.items():
-                status = normalized_status_from_info(info)
-                rows.append((str(name), str(status)))
+                rows.append((str(name), str(normalize_status(info))))
         elif isinstance(value, list):
             for i, info in enumerate(value):
                 if isinstance(info, dict):
-                    name = info.get("name") or info.get("module") or info.get("container") or f"module_{i+1}"
-                    status = normalized_status_from_info(info)
-                    rows.append((str(name), str(status)))
+                    name = info.get("name") or info.get("module") or info.get("container") or f"module_{i + 1}"
+                    rows.append((str(name), str(normalize_status(info))))
                 else:
-                    rows.append((f"module_{i+1}", str(info)))
+                    rows.append((f"module_{i + 1}", str(info)))
     header = payload.get("latest_rep_header") or {}
     if isinstance(header, dict) and header.get("file"):
         rows.append(("Earthworm EEW header", "available"))
@@ -158,64 +151,50 @@ def module_items(payload):
 def render_status(source):
     try:
         payload, label = load_status(source)
-    except Exception as e:
+    except Exception as exc:
         with open(FIXTURES / "normal_event.json", "r", encoding="utf-8") as f:
             payload = json.load(f)
-        label = f"fallback: {e}"
+        label = f"fallback: {exc}"
 
     alive_cards = []
     info_cards = []
     for name, status in module_items(payload):
-        if is_alive_status(status):
-            alive_cards.append(
-                f"<div class='alive-card'><span class='lamp'></span><div><b>{esc(name)}</b><small>{esc(status)}</small></div></div>"
-            )
+        if str(status).strip().lower() == "alive":
+            alive_cards.append(f"<div class='alive-card'><span class='lamp'></span><div><b>{esc(name)}</b><small>{esc(status)}</small></div></div>")
         else:
-            cls = level(status)
-            info_cards.append(
-                f"<div class='info-card {cls}'><div><b>{esc(name)}</b><small>{esc(status)}</small></div><span class='tag'>{esc(status)}</span></div>"
-            )
+            cls = status_level(status)
+            info_cards.append(f"<div class='info-card {cls}'><div><b>{esc(name)}</b><small>{esc(status)}</small></div><span class='tag'>{esc(status)}</span></div>")
 
-    alive_html = "".join(alive_cards) if alive_cards else "<div class='empty'>目前沒有 alive 型式狀態。</div>"
-    info_html = "".join(info_cards) if info_cards else "<div class='empty'>沒有其他狀態資訊。</div>"
+    alive_html = "".join(alive_cards) or "<div class='empty'>目前沒有 alive 型式狀態。</div>"
+    info_html = "".join(info_cards) or "<div class='empty'>沒有其他狀態資訊。</div>"
     source_text = f"{STATUS_DATASET_ID} / {label}"
 
     return f"""
 <style>
 .status-wrap{{display:grid;gap:16px}}
-.status-hero{{
-  position:relative;overflow:hidden;display:flex;justify-content:space-between;align-items:center;gap:18px;
-  border-radius:24px;padding:24px 22px;color:#fff!important;
-  background:radial-gradient(circle at 86% 24%,rgba(125,211,252,.45),transparent 28%),linear-gradient(135deg,#1d4ed8 0%,#2563eb 45%,#0284c7 100%);
-  box-shadow:0 18px 38px rgba(37,99,235,.28),0 6px 18px rgba(15,23,42,.14);
-}}
-.status-hero h2{{margin:4px 0 12px!important;font-size:32px!important;line-height:1.08!important;color:#fff!important;font-weight:950!important;letter-spacing:.02em;text-shadow:0 2px 10px rgba(15,23,42,.22)}}
-.hero-kicker{{font-size:12px;font-weight:900;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.76)!important}}
-.src{{display:inline-block;max-width:100%;padding:9px 12px;border-radius:14px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.26);color:#fff!important;font-size:14px!important;line-height:1.55!important;font-weight:700!important;word-break:break-word;box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}}
+.status-hero{{position:relative;overflow:hidden;display:flex;justify-content:space-between;align-items:center;gap:18px;border-radius:24px;padding:24px 22px;color:#fff!important;background:radial-gradient(circle at 86% 24%,rgba(125,211,252,.45),transparent 28%),linear-gradient(135deg,#1d4ed8 0%,#2563eb 45%,#0284c7 100%);box-shadow:0 18px 38px rgba(37,99,235,.28),0 6px 18px rgba(15,23,42,.14)}}
+.status-hero h2{{margin:4px 0 12px!important;font-size:32px!important;line-height:1.08!important;color:#fff!important;font-weight:950!important;text-shadow:0 2px 10px rgba(15,23,42,.22)}}
+.hero-kicker{{font-size:12px;font-weight:900;letter-spacing:.12em;color:rgba(255,255,255,.76)!important}}
+.src{{display:inline-block;max-width:100%;padding:9px 12px;border-radius:14px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.26);color:#fff!important;font-size:14px!important;line-height:1.55!important;font-weight:700!important;word-break:break-word}}
 .src span{{color:rgba(255,255,255,.82)!important;margin-right:6px}}
 .hero-icon{{flex:0 0 auto;width:76px;height:76px;border-radius:999px;border:8px solid rgba(255,255,255,.22);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.60)!important;font-size:38px;font-weight:900}}
 .section{{background:#fff;border:1px solid #e5e7eb;border-radius:18px;padding:14px;box-shadow:0 8px 22px rgba(15,23,42,.06)}}
 .section-title{{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;color:#0f172a;font-weight:900;font-size:17px}}
 .section-note{{font-size:12px;color:#64748b;font-weight:600}}
-.alive-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}}
-.info-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}
+.alive-grid,.info-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}}
 .alive-card{{display:flex;gap:12px;align-items:center;padding:15px;border-radius:16px;background:linear-gradient(180deg,#f0fdf4,#ffffff);border:1px solid rgba(34,197,94,.28)}}
 .lamp{{width:24px;height:24px;border-radius:99px;background:#22c55e;box-shadow:0 0 0 7px rgba(34,197,94,.16),0 0 20px rgba(34,197,94,.70);flex:0 0 auto}}
 .info-card{{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px;border-radius:16px;background:#f8fafc;border:1px solid #e2e8f0}}
-.info-card.ok{{background:#f8fafc;border-color:#dbeafe}}.info-card.warn{{background:#fffbeb;border-color:#fde68a}}.info-card.bad{{background:#fef2f2;border-color:#fecaca}}
+.info-card.ok{{border-color:#dbeafe}}.info-card.warn{{background:#fffbeb;border-color:#fde68a}}.info-card.bad{{background:#fef2f2;border-color:#fecaca}}
 b{{display:block;color:#0f172a}}small{{display:block;color:#64748b;margin-top:4px;word-break:break-all}}
-.alive-card b{{font-size:18px!important}}
-.alive-card small{{font-size:14px!important;color:#14532d!important}}
+.alive-card b{{font-size:18px!important}}.alive-card small{{font-size:14px!important;color:#14532d!important}}
 .tag{{font-size:12px;font-weight:800;border-radius:999px;padding:6px 10px;background:#e2e8f0;color:#334155;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis}}
 .info-card.ok .tag{{background:#dbeafe;color:#1d4ed8}}.info-card.warn .tag{{background:#fef3c7;color:#b45309}}.info-card.bad .tag{{background:#fee2e2;color:#b91c1c}}
 .empty{{padding:14px;border-radius:14px;background:#f8fafc;color:#64748b;border:1px dashed #cbd5e1}}
 @media(max-width:640px){{.alive-grid,.info-grid{{grid-template-columns:1fr}}.status-hero{{padding:22px 18px;align-items:flex-start}}.status-hero h2{{font-size:28px!important}}.hero-icon{{width:58px;height:58px;border-width:6px;font-size:30px}}.src{{font-size:13px!important}}}}
 </style>
 <div class='status-wrap'>
-  <div class='status-hero'>
-    <div><div class='hero-kicker'>EEW STATUS</div><h2>系統狀態</h2><div class='src'><span>來源</span>{esc(source_text)}</div></div>
-    <div class='hero-icon'>⌁</div>
-  </div>
+  <div class='status-hero'><div><div class='hero-kicker'>EEW STATUS</div><h2>系統狀態</h2><div class='src'><span>來源</span>{esc(source_text)}</div></div><div class='hero-icon'>⌁</div></div>
   <div class='section'><div class='section-title'>Alive 模組綠燈 <span class='section-note'>僅 alive 使用燈號</span></div><div class='alive-grid'>{alive_html}</div></div>
   <div class='section'><div class='section-title'>其他狀態資訊 <span class='section-note'>非 alive 不使用燈號</span></div><div class='info-grid'>{info_html}</div></div>
 </div>
@@ -229,23 +208,23 @@ def parse_rep_event(payload):
         return None
     event = {"source_file": header.get("file"), "stations": []}
     for i, line in enumerate(lines):
-        if isinstance(line, str) and line.strip().lower().startswith("year"):
-            if i + 1 < len(lines):
-                parts = str(lines[i + 1]).split()
-                if len(parts) >= 14:
-                    year, month, day, hour, minute = parts[0:5]
-                    sec = parts[5]
-                    event.update({
-                        "time": f"{int(year):04d}/{int(month):02d}/{int(day):02d} {int(hour):02d}:{int(minute):02d}:{float(sec):05.2f}",
-                        "lat": to_float(parts[6]),
-                        "lon": to_float(parts[7]),
-                        "depth_km": to_float(parts[8]),
-                        "magnitude": to_float(parts[9]),
-                        "mpd": to_float(parts[12]) if len(parts) > 12 else None,
-                        "mtc": to_float(parts[13]) if len(parts) > 13 else None,
-                        "process_time": to_float(parts[14]) if len(parts) > 14 else None,
-                    })
-        if isinstance(line, str) and line.strip().lower().startswith("sta"):
+        text = str(line)
+        if text.strip().lower().startswith("year") and i + 1 < len(lines):
+            parts = str(lines[i + 1]).split()
+            if len(parts) >= 14:
+                year, month, day, hour, minute = parts[0:5]
+                sec = parts[5]
+                event.update({
+                    "time": f"{int(year):04d}/{int(month):02d}/{int(day):02d} {int(hour):02d}:{int(minute):02d}:{float(sec):05.2f}",
+                    "lat": to_float(parts[6]),
+                    "lon": to_float(parts[7]),
+                    "depth_km": to_float(parts[8]),
+                    "magnitude": to_float(parts[9]),
+                    "mpd": to_float(parts[12]) if len(parts) > 12 else None,
+                    "mtc": to_float(parts[13]) if len(parts) > 13 else None,
+                    "process_time": to_float(parts[14]) if len(parts) > 14 else None,
+                })
+        if text.strip().lower().startswith("sta"):
             for row in lines[i + 1:]:
                 cols = str(row).split()
                 if len(cols) >= 6:
@@ -318,26 +297,29 @@ def event_map_figure(event):
 
     lat = event["lat"]
     lon = event["lon"]
-    mag = event.get("magnitude") or 0
-    marker_size = max(16, min(34, 10 + mag * 4))
-    hover = (
-        f"震央<br>時間：{event.get('time') or '—'}<br>規模：{mag:.2f if isinstance(mag, float) else mag}<br>"
-        f"深度：{event.get('depth_km') or '—'} km<br>座標：{lat:.4f}, {lon:.4f}"
-    )
+    mag = event.get("magnitude")
+    dep = event.get("depth_km")
+    marker_size = max(16, min(34, 10 + (mag or 0) * 4))
+    mag_text = f"{mag:.2f}" if isinstance(mag, (int, float)) else "—"
+    dep_text = f"{dep:.1f}" if isinstance(dep, (int, float)) else "—"
+    hover = f"震央<br>時間：{event.get('time') or '—'}<br>規模：{mag_text}<br>深度：{dep_text} km<br>座標：{lat:.4f}, {lon:.4f}"
+
     fig.add_trace(go.Scattermapbox(
         lat=[lat], lon=[lon], mode="markers+text", text=["震央"], textposition="top center",
         marker={"size": marker_size, "color": "#ef4444", "opacity": 0.92},
         hovertext=[hover], hoverinfo="text", name="震央"
     ))
     stations = event.get("stations") or []
-    station_lats = [s.get("lat") for s in stations if s.get("lat") is not None and s.get("lon") is not None]
-    station_lons = [s.get("lon") for s in stations if s.get("lat") is not None and s.get("lon") is not None]
-    station_names = [s.get("station", "station") for s in stations if s.get("lat") is not None and s.get("lon") is not None]
-    if station_lats:
+    valid_stations = [s for s in stations if s.get("lat") is not None and s.get("lon") is not None]
+    if valid_stations:
         fig.add_trace(go.Scattermapbox(
-            lat=station_lats, lon=station_lons, mode="markers",
+            lat=[s["lat"] for s in valid_stations],
+            lon=[s["lon"] for s in valid_stations],
+            mode="markers",
             marker={"size": 8, "color": "#2563eb", "opacity": 0.72},
-            hovertext=[f"測站：{name}" for name in station_names], hoverinfo="text", name="測站"
+            hovertext=[f"測站：{s.get('station', 'station')}" for s in valid_stations],
+            hoverinfo="text",
+            name="測站",
         ))
     fig.update_layout(
         title="地震事件 Plotly 地圖",
@@ -352,10 +334,10 @@ def event_map_figure(event):
 def render_event(source):
     try:
         payload, label = load_status(source)
-    except Exception as e:
+    except Exception as exc:
         with open(FIXTURES / "normal_event.json", "r", encoding="utf-8") as f:
             payload = json.load(f)
-        label = f"fallback: {e}"
+        label = f"fallback: {exc}"
     event = event_from_payload(payload)
     return event_info_html(event, label), event_map_figure(event)
 
@@ -474,9 +456,9 @@ def plot_waveform(source):
     try:
         series, label = load_waveform(source)
         msg = f"✅ 已載入 {label}，波形分開繪製並附統計資訊。"
-    except Exception as e:
+    except Exception as exc:
         series, label = demo_series(), "demo://synthetic fallback"
-        msg = f"⚠️ 遠端波形讀取失敗，改顯示示範資料：{e}"
+        msg = f"⚠️ 遠端波形讀取失敗，改顯示示範資料：{exc}"
 
     clean = []
     stats_rows = []
@@ -495,49 +477,20 @@ def plot_waveform(source):
         return msg, fig, pd.DataFrame([{"status": "no numeric waveform data"}])
 
     rows = min(len(clean), MAX_TRACES)
-    fig = make_subplots(
-        rows=rows,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.014,
-        subplot_titles=[item["label"] for item in clean[:rows]],
-    )
+    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.014, subplot_titles=[item["label"] for item in clean[:rows]])
     for idx, item in enumerate(clean[:rows], start=1):
         y = item["y"]
         ymin, ymax = min(y), max(y)
         pad = max((ymax - ymin) * 0.12, 1e-9)
         fig.add_trace(
-            go.Scatter(
-                x=list(range(len(y))),
-                y=y,
-                mode="lines",
-                name=item["label"],
-                line={"width": 1.6},
-                hovertemplate="sample=%{x}<br>amp=%{y:.6f}<extra></extra>",
-                showlegend=False,
-            ),
+            go.Scatter(x=list(range(len(y))), y=y, mode="lines", name=item["label"], line={"width": 1.6}, hovertemplate="sample=%{x}<br>amp=%{y:.6f}<extra></extra>", showlegend=False),
             row=idx,
             col=1,
         )
-        fig.update_yaxes(
-            title_text=f"T{idx}",
-            showgrid=True,
-            zeroline=True,
-            zerolinewidth=1,
-            zerolinecolor="rgba(30,41,59,0.45)",
-            range=[ymin - pad, ymax + pad],
-            row=idx,
-            col=1,
-        )
+        fig.update_yaxes(title_text=f"T{idx}", showgrid=True, zeroline=True, zerolinewidth=1, zerolinecolor="rgba(30,41,59,0.45)", range=[ymin - pad, ymax + pad], row=idx, col=1)
 
     fig.update_xaxes(title_text="Samples / time", showgrid=True, zeroline=False, row=rows, col=1)
-    fig.update_layout(
-        title=f"靜態波形：{label}",
-        height=max(1050, rows * 220),
-        template="plotly_white",
-        margin={"l":80,"r":28,"t":80,"b":60},
-        hovermode="x unified",
-    )
+    fig.update_layout(title=f"靜態波形：{label}", height=max(1050, rows * 220), template="plotly_white", margin={"l":80,"r":28,"t":80,"b":60}, hovermode="x unified")
     return msg, fig, pd.DataFrame(stats_rows)
 
 
