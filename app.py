@@ -105,6 +105,19 @@ def level(text):
     return "neutral"
 
 
+def is_alive_status(text):
+    return str(text).strip().lower() == "alive"
+
+
+def normalized_status_from_info(info):
+    if isinstance(info, dict):
+        if "alive" in info or "is_alive" in info:
+            value = info.get("alive", info.get("is_alive"))
+            return "alive" if str(value).strip().lower() in {"true", "1", "yes", "alive"} else "not alive"
+        return info.get("status") or info.get("state") or info.get("health") or info.get("ok") or "unknown"
+    return info
+
+
 def module_items(payload):
     rows = []
     sources = ["containers", "container_status", "container", "docker", "modules", "module_status", "services", "checks"]
@@ -112,17 +125,16 @@ def module_items(payload):
         value = payload.get(key)
         if isinstance(value, dict):
             for name, info in value.items():
-                if isinstance(info, dict):
-                    status = info.get("status") or info.get("state") or info.get("health") or info.get("alive") or info.get("ok") or "unknown"
-                else:
-                    status = info
+                status = normalized_status_from_info(info)
                 rows.append((str(name), str(status)))
         elif isinstance(value, list):
             for i, info in enumerate(value):
                 if isinstance(info, dict):
                     name = info.get("name") or info.get("module") or info.get("container") or f"module_{i+1}"
-                    status = info.get("status") or info.get("state") or info.get("health") or info.get("alive") or "unknown"
+                    status = normalized_status_from_info(info)
                     rows.append((str(name), str(status)))
+                else:
+                    rows.append((f"module_{i+1}", str(info)))
     header = payload.get("latest_rep_header") or {}
     if isinstance(header, dict) and header.get("file"):
         rows.append(("Earthworm EEW header", "available"))
@@ -141,24 +153,48 @@ def render_status(source):
         with open(FIXTURES / "normal_event.json", "r", encoding="utf-8") as f:
             payload = json.load(f)
         label = f"fallback: {e}"
-    cards = []
+
+    alive_cards = []
+    info_cards = []
     for name, status in module_items(payload):
-        cls = level(status)
-        cards.append(f"<div class='card {cls}'><span class='lamp'></span><div><b>{esc(name)}</b><small>{esc(status)}</small></div></div>")
+        if is_alive_status(status):
+            alive_cards.append(
+                f"<div class='alive-card'><span class='lamp'></span><div><b>{esc(name)}</b><small>{esc(status)}</small></div></div>"
+            )
+        else:
+            cls = level(status)
+            info_cards.append(
+                f"<div class='info-card {cls}'><div><b>{esc(name)}</b><small>{esc(status)}</small></div><span class='tag'>{esc(status)}</span></div>"
+            )
+
+    alive_html = "".join(alive_cards) if alive_cards else "<div class='empty'>目前沒有 alive 型式狀態。</div>"
+    info_html = "".join(info_cards) if info_cards else "<div class='empty'>沒有其他狀態資訊。</div>"
+
     return f"""
 <style>
-.wrap{{display:grid;gap:14px}}.hero{{border-radius:20px;padding:18px;color:#fff;background:linear-gradient(135deg,#0f172a,#2563eb);box-shadow:0 10px 24px rgba(15,23,42,.16)}}
-.hero h2{{margin:0 0 6px;font-size:24px}}.src{{font-size:13px;opacity:.85;word-break:break-all}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}}
-.card{{display:flex;gap:12px;align-items:center;padding:14px;border-radius:16px;background:#fff;border:1px solid #e5e7eb;box-shadow:0 6px 18px rgba(15,23,42,.06)}}
-.lamp{{width:22px;height:22px;border-radius:99px;background:#64748b;box-shadow:0 0 0 6px rgba(100,116,139,.12)}}
-.ok .lamp{{background:#22c55e;box-shadow:0 0 0 6px rgba(34,197,94,.16),0 0 18px rgba(34,197,94,.65)}}
-.warn .lamp{{background:#f59e0b;box-shadow:0 0 0 6px rgba(245,158,11,.18),0 0 18px rgba(245,158,11,.65)}}
-.bad .lamp{{background:#ef4444;box-shadow:0 0 0 6px rgba(239,68,68,.18),0 0 18px rgba(239,68,68,.65)}}
-b{{display:block;color:#0f172a}}small{{display:block;color:#64748b;margin-top:3px;word-break:break-all}}
-@media(max-width:640px){{.grid{{grid-template-columns:1fr}}.hero h2{{font-size:21px}}}}
+.status-wrap{{display:grid;gap:16px}}
+.status-hero{{border-radius:20px;padding:18px;color:#fff;background:linear-gradient(135deg,#0f172a,#2563eb);box-shadow:0 10px 24px rgba(15,23,42,.16)}}
+.status-hero h2{{margin:0 0 6px;font-size:24px}}.src{{font-size:13px;opacity:.85;word-break:break-all}}
+.section{{background:#fff;border:1px solid #e5e7eb;border-radius:18px;padding:14px;box-shadow:0 8px 22px rgba(15,23,42,.06)}}
+.section-title{{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;color:#0f172a;font-weight:900;font-size:17px}}
+.section-note{{font-size:12px;color:#64748b;font-weight:600}}
+.alive-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}}
+.info-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}
+.alive-card{{display:flex;gap:12px;align-items:center;padding:15px;border-radius:16px;background:linear-gradient(180deg,#f0fdf4,#ffffff);border:1px solid rgba(34,197,94,.28)}}
+.lamp{{width:24px;height:24px;border-radius:99px;background:#22c55e;box-shadow:0 0 0 7px rgba(34,197,94,.16),0 0 20px rgba(34,197,94,.70);flex:0 0 auto}}
+.info-card{{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px;border-radius:16px;background:#f8fafc;border:1px solid #e2e8f0}}
+.info-card.ok{{background:#f8fafc;border-color:#dbeafe}}.info-card.warn{{background:#fffbeb;border-color:#fde68a}}.info-card.bad{{background:#fef2f2;border-color:#fecaca}}
+b{{display:block;color:#0f172a}}small{{display:block;color:#64748b;margin-top:4px;word-break:break-all}}
+.tag{{font-size:12px;font-weight:800;border-radius:999px;padding:6px 10px;background:#e2e8f0;color:#334155;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis}}
+.info-card.ok .tag{{background:#dbeafe;color:#1d4ed8}}.info-card.warn .tag{{background:#fef3c7;color:#b45309}}.info-card.bad .tag{{background:#fee2e2;color:#b91c1c}}
+.empty{{padding:14px;border-radius:14px;background:#f8fafc;color:#64748b;border:1px dashed #cbd5e1}}
+@media(max-width:640px){{.alive-grid,.info-grid{{grid-template-columns:1fr}}.status-hero h2{{font-size:21px}}}}
 </style>
-<div class='wrap'><div class='hero'><h2>系統狀態亮燈</h2><div class='src'>來源：{esc(STATUS_DATASET_ID)} / {esc(label)}</div></div><div class='grid'>{''.join(cards)}</div></div>
+<div class='status-wrap'>
+  <div class='status-hero'><h2>系統狀態</h2><div class='src'>來源：{esc(STATUS_DATASET_ID)} / {esc(label)}</div></div>
+  <div class='section'><div class='section-title'>Alive 模組綠燈 <span class='section-note'>僅 alive 使用燈號</span></div><div class='alive-grid'>{alive_html}</div></div>
+  <div class='section'><div class='section-title'>其他狀態資訊 <span class='section-note'>非 alive 不使用燈號</span></div><div class='info-grid'>{info_html}</div></div>
+</div>
 """
 
 
@@ -275,7 +311,7 @@ def trace_stats(label, y):
 def plot_waveform(source):
     try:
         series, label = load_waveform(source)
-        msg = f"✅ 已載入 {label}，alive 狀態會亮綠燈；波形分開繪製並附統計資訊。"
+        msg = f"✅ 已載入 {label}，波形分開繪製並附統計資訊。"
     except Exception as e:
         series, label = demo_series(), "demo://synthetic fallback"
         msg = f"⚠️ 遠端波形讀取失敗，改顯示示範資料：{e}"
@@ -347,7 +383,7 @@ status_opts = status_choices()
 wave_opts = waveform_choices()
 
 with gr.Blocks(title="EEW Dashboard") as demo:
-    gr.Markdown("# EEW Dashboard\n系統狀態以亮燈呈現；`alive` 亮綠燈。靜態波形使用 Plotly，10 條波線分開畫、one column，並附統計資訊。")
+    gr.Markdown("# EEW Dashboard\n系統狀態分為 Alive 綠燈與其他狀態資訊；非 alive 不使用燈號。靜態波形使用 Plotly，10 條波線分開畫、one column，並附統計資訊。")
     with gr.Tab("系統狀態"):
         with gr.Row():
             s = gr.Dropdown(choices=status_opts, value=status_opts[0], label="Status file")
