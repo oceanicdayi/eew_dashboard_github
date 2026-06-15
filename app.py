@@ -27,6 +27,15 @@ def esc(x):
     return html.escape("" if x is None else str(x))
 
 
+def to_float(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
 @lru_cache(maxsize=1)
 def status_files():
     try:
@@ -211,6 +220,144 @@ b{{display:block;color:#0f172a}}small{{display:block;color:#64748b;margin-top:4p
   <div class='section'><div class='section-title'>其他狀態資訊 <span class='section-note'>非 alive 不使用燈號</span></div><div class='info-grid'>{info_html}</div></div>
 </div>
 """
+
+
+def parse_rep_event(payload):
+    header = payload.get("latest_rep_header") or {}
+    lines = header.get("head") or []
+    if not isinstance(lines, list):
+        return None
+    event = {"source_file": header.get("file"), "stations": []}
+    for i, line in enumerate(lines):
+        if isinstance(line, str) and line.strip().lower().startswith("year"):
+            if i + 1 < len(lines):
+                parts = str(lines[i + 1]).split()
+                if len(parts) >= 14:
+                    year, month, day, hour, minute = parts[0:5]
+                    sec = parts[5]
+                    event.update({
+                        "time": f"{int(year):04d}/{int(month):02d}/{int(day):02d} {int(hour):02d}:{int(minute):02d}:{float(sec):05.2f}",
+                        "lat": to_float(parts[6]),
+                        "lon": to_float(parts[7]),
+                        "depth_km": to_float(parts[8]),
+                        "magnitude": to_float(parts[9]),
+                        "mpd": to_float(parts[12]) if len(parts) > 12 else None,
+                        "mtc": to_float(parts[13]) if len(parts) > 13 else None,
+                        "process_time": to_float(parts[14]) if len(parts) > 14 else None,
+                    })
+        if isinstance(line, str) and line.strip().lower().startswith("sta"):
+            for row in lines[i + 1:]:
+                cols = str(row).split()
+                if len(cols) >= 6:
+                    sta_lat = to_float(cols[4])
+                    sta_lon = to_float(cols[5])
+                    if sta_lat is not None and sta_lon is not None:
+                        event["stations"].append({"station": cols[0], "lat": sta_lat, "lon": sta_lon})
+    return event if event.get("lat") is not None and event.get("lon") is not None else None
+
+
+def event_from_payload(payload):
+    for key in ["latest_event", "event", "latest_report", "eew_event", "earthquake", "summary", "latest_event_summary", "eew_summary"]:
+        obj = payload.get(key)
+        if isinstance(obj, dict):
+            lat = to_float(obj.get("lat") or obj.get("latitude"))
+            lon = to_float(obj.get("lon") or obj.get("lng") or obj.get("longitude"))
+            if lat is not None and lon is not None:
+                return {
+                    "time": obj.get("time") or obj.get("origin_time") or obj.get("datetime") or obj.get("timestamp"),
+                    "lat": lat,
+                    "lon": lon,
+                    "depth_km": to_float(obj.get("depth") or obj.get("depth_km") or obj.get("dep")),
+                    "magnitude": to_float(obj.get("magnitude") or obj.get("mag") or obj.get("Mall") or obj.get("ml")),
+                    "location": obj.get("location") or obj.get("area") or obj.get("epicenter"),
+                    "source_file": obj.get("file") or obj.get("source"),
+                    "stations": obj.get("stations") if isinstance(obj.get("stations"), list) else [],
+                }
+    return parse_rep_event(payload)
+
+
+def event_info_html(event, source_label):
+    if not event:
+        return "<div class='event-empty'>目前狀態檔內沒有可解析的地震事件經緯度資料。</div>"
+    mag = event.get("magnitude")
+    dep = event.get("depth_km")
+    lat = event.get("lat")
+    lon = event.get("lon")
+    cards = [
+        ("發震時間", event.get("time") or "—"),
+        ("規模", f"M {mag:.2f}" if mag is not None else "—"),
+        ("深度", f"{dep:.1f} km" if dep is not None else "—"),
+        ("震央座標", f"{lat:.4f}, {lon:.4f}" if lat is not None and lon is not None else "—"),
+        ("來源檔案", event.get("source_file") or source_label or "—"),
+        ("測站數", str(len(event.get("stations") or []))),
+    ]
+    card_html = "".join(f"<div class='eq-card'><div class='eq-label'>{esc(k)}</div><div class='eq-value'>{esc(v)}</div></div>" for k, v in cards)
+    location = event.get("location") or "震央位置依狀態資料解析"
+    return f"""
+<style>
+.eq-wrap{{display:grid;gap:14px}}
+.eq-hero{{border-radius:22px;padding:20px;color:#fff;background:linear-gradient(135deg,#7f1d1d,#dc2626 55%,#f97316);box-shadow:0 14px 28px rgba(127,29,29,.18)}}
+.eq-hero h2{{margin:0 0 8px!important;color:#fff!important;font-size:28px!important;font-weight:950!important}}
+.eq-hero p{{margin:0;color:rgba(255,255,255,.88)!important;font-weight:700!important}}
+.eq-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}}
+.eq-card{{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:14px;box-shadow:0 6px 18px rgba(15,23,42,.06)}}
+.eq-label{{font-size:12px;color:#64748b;font-weight:800;margin-bottom:6px}}
+.eq-value{{font-size:18px;color:#0f172a;font-weight:900;word-break:break-word}}
+.event-empty{{padding:16px;border-radius:16px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-weight:800}}
+</style>
+<div class='eq-wrap'><div class='eq-hero'><h2>地震事件資訊</h2><p>{esc(location)}</p></div><div class='eq-grid'>{card_html}</div></div>
+"""
+
+
+def event_map_figure(event):
+    fig = go.Figure()
+    if not event or event.get("lat") is None or event.get("lon") is None:
+        fig.add_annotation(text="無可繪製的地震事件座標", x=.5, y=.5, showarrow=False)
+        fig.update_layout(height=520, template="plotly_white")
+        return fig
+
+    lat = event["lat"]
+    lon = event["lon"]
+    mag = event.get("magnitude") or 0
+    marker_size = max(16, min(34, 10 + mag * 4))
+    hover = (
+        f"震央<br>時間：{event.get('time') or '—'}<br>規模：{mag:.2f if isinstance(mag, float) else mag}<br>"
+        f"深度：{event.get('depth_km') or '—'} km<br>座標：{lat:.4f}, {lon:.4f}"
+    )
+    fig.add_trace(go.Scattermapbox(
+        lat=[lat], lon=[lon], mode="markers+text", text=["震央"], textposition="top center",
+        marker={"size": marker_size, "color": "#ef4444", "opacity": 0.92},
+        hovertext=[hover], hoverinfo="text", name="震央"
+    ))
+    stations = event.get("stations") or []
+    station_lats = [s.get("lat") for s in stations if s.get("lat") is not None and s.get("lon") is not None]
+    station_lons = [s.get("lon") for s in stations if s.get("lat") is not None and s.get("lon") is not None]
+    station_names = [s.get("station", "station") for s in stations if s.get("lat") is not None and s.get("lon") is not None]
+    if station_lats:
+        fig.add_trace(go.Scattermapbox(
+            lat=station_lats, lon=station_lons, mode="markers",
+            marker={"size": 8, "color": "#2563eb", "opacity": 0.72},
+            hovertext=[f"測站：{name}" for name in station_names], hoverinfo="text", name="測站"
+        ))
+    fig.update_layout(
+        title="地震事件 Plotly 地圖",
+        height=560,
+        margin={"l": 0, "r": 0, "t": 52, "b": 0},
+        mapbox={"style": "open-street-map", "center": {"lat": lat, "lon": lon}, "zoom": 7.2},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0},
+    )
+    return fig
+
+
+def render_event(source):
+    try:
+        payload, label = load_status(source)
+    except Exception as e:
+        with open(FIXTURES / "normal_event.json", "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        label = f"fallback: {e}"
+    event = event_from_payload(payload)
+    return event_info_html(event, label), event_map_figure(event)
 
 
 def floats(values, limit=50000):
@@ -398,7 +545,7 @@ status_opts = status_choices()
 wave_opts = waveform_choices()
 
 with gr.Blocks(title="EEW Dashboard") as demo:
-    gr.Markdown("# EEW Dashboard\n系統狀態分為 Alive 綠燈與其他狀態資訊；非 alive 不使用燈號。靜態波形使用 Plotly，10 條波線分開畫、one column，並附統計資訊。")
+    gr.Markdown("# EEW Dashboard\n系統狀態、地震事件與靜態波形儀表板。地震事件使用 Plotly 地圖呈現震央與測站位置。")
     with gr.Tab("系統狀態"):
         with gr.Row():
             s = gr.Dropdown(choices=status_opts, value=status_opts[0], label="Status file")
@@ -410,6 +557,18 @@ with gr.Blocks(title="EEW Dashboard") as demo:
         sl.click(render_status, inputs=s, outputs=lights)
         s.change(render_status, inputs=s, outputs=lights)
         demo.load(render_status, inputs=s, outputs=lights)
+    with gr.Tab("地震事件"):
+        with gr.Row():
+            es = gr.Dropdown(choices=status_opts, value=status_opts[0], label="Status file")
+            er = gr.Button("重新讀取狀態清單")
+            el = gr.Button("載入事件")
+        em = gr.Markdown()
+        event_info = gr.HTML()
+        event_map = gr.Plot(label="Plotly earthquake map")
+        er.click(refresh_status, outputs=[es, em])
+        el.click(render_event, inputs=es, outputs=[event_info, event_map])
+        es.change(render_event, inputs=es, outputs=[event_info, event_map])
+        demo.load(render_event, inputs=es, outputs=[event_info, event_map])
     with gr.Tab("靜態波形"):
         with gr.Row():
             w = gr.Dropdown(choices=wave_opts, value=wave_opts[0], label="Waveform file")
