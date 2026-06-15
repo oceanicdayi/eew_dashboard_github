@@ -1,5 +1,4 @@
-# Deployment trigger after repository secret was configured.
-gradio==4.44.1
+# Hugging Face Spaces installs the runtime Gradio version automatically.
 requests==2.32.3
 folium==0.17.0
 huggingface_hub==0.25.2
