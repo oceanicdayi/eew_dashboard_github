@@ -169,12 +169,22 @@ def render_status(source):
 
     alive_html = "".join(alive_cards) if alive_cards else "<div class='empty'>目前沒有 alive 型式狀態。</div>"
     info_html = "".join(info_cards) if info_cards else "<div class='empty'>沒有其他狀態資訊。</div>"
+    source_text = f"{STATUS_DATASET_ID} / {label}"
 
     return f"""
 <style>
 .status-wrap{{display:grid;gap:16px}}
-.status-hero{{border-radius:20px;padding:18px;color:#fff;background:linear-gradient(135deg,#0f172a,#2563eb);box-shadow:0 10px 24px rgba(15,23,42,.16)}}
-.status-hero h2{{margin:0 0 6px;font-size:24px}}.src{{font-size:13px;opacity:.85;word-break:break-all}}
+.status-hero{{
+  position:relative;overflow:hidden;display:flex;justify-content:space-between;align-items:center;gap:18px;
+  border-radius:24px;padding:24px 22px;color:#fff!important;
+  background:radial-gradient(circle at 86% 24%,rgba(125,211,252,.45),transparent 28%),linear-gradient(135deg,#1d4ed8 0%,#2563eb 45%,#0284c7 100%);
+  box-shadow:0 18px 38px rgba(37,99,235,.28),0 6px 18px rgba(15,23,42,.14);
+}}
+.status-hero h2{{margin:4px 0 12px!important;font-size:32px!important;line-height:1.08!important;color:#fff!important;font-weight:950!important;letter-spacing:.02em;text-shadow:0 2px 10px rgba(15,23,42,.22)}}
+.hero-kicker{{font-size:12px;font-weight:900;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.76)!important}}
+.src{{display:inline-block;max-width:100%;padding:9px 12px;border-radius:14px;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.26);color:#fff!important;font-size:14px!important;line-height:1.55!important;font-weight:700!important;word-break:break-word;box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}}
+.src span{{color:rgba(255,255,255,.82)!important;margin-right:6px}}
+.hero-icon{{flex:0 0 auto;width:76px;height:76px;border-radius:999px;border:8px solid rgba(255,255,255,.22);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.60)!important;font-size:38px;font-weight:900}}
 .section{{background:#fff;border:1px solid #e5e7eb;border-radius:18px;padding:14px;box-shadow:0 8px 22px rgba(15,23,42,.06)}}
 .section-title{{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;color:#0f172a;font-weight:900;font-size:17px}}
 .section-note{{font-size:12px;color:#64748b;font-weight:600}}
@@ -185,13 +195,18 @@ def render_status(source):
 .info-card{{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px;border-radius:16px;background:#f8fafc;border:1px solid #e2e8f0}}
 .info-card.ok{{background:#f8fafc;border-color:#dbeafe}}.info-card.warn{{background:#fffbeb;border-color:#fde68a}}.info-card.bad{{background:#fef2f2;border-color:#fecaca}}
 b{{display:block;color:#0f172a}}small{{display:block;color:#64748b;margin-top:4px;word-break:break-all}}
+.alive-card b{{font-size:18px!important}}
+.alive-card small{{font-size:14px!important;color:#14532d!important}}
 .tag{{font-size:12px;font-weight:800;border-radius:999px;padding:6px 10px;background:#e2e8f0;color:#334155;white-space:nowrap;max-width:140px;overflow:hidden;text-overflow:ellipsis}}
 .info-card.ok .tag{{background:#dbeafe;color:#1d4ed8}}.info-card.warn .tag{{background:#fef3c7;color:#b45309}}.info-card.bad .tag{{background:#fee2e2;color:#b91c1c}}
 .empty{{padding:14px;border-radius:14px;background:#f8fafc;color:#64748b;border:1px dashed #cbd5e1}}
-@media(max-width:640px){{.alive-grid,.info-grid{{grid-template-columns:1fr}}.status-hero h2{{font-size:21px}}}}
+@media(max-width:640px){{.alive-grid,.info-grid{{grid-template-columns:1fr}}.status-hero{{padding:22px 18px;align-items:flex-start}}.status-hero h2{{font-size:28px!important}}.hero-icon{{width:58px;height:58px;border-width:6px;font-size:30px}}.src{{font-size:13px!important}}}}
 </style>
 <div class='status-wrap'>
-  <div class='status-hero'><h2>系統狀態</h2><div class='src'>來源：{esc(STATUS_DATASET_ID)} / {esc(label)}</div></div>
+  <div class='status-hero'>
+    <div><div class='hero-kicker'>EEW STATUS</div><h2>系統狀態</h2><div class='src'><span>來源</span>{esc(source_text)}</div></div>
+    <div class='hero-icon'>⌁</div>
+  </div>
   <div class='section'><div class='section-title'>Alive 模組綠燈 <span class='section-note'>僅 alive 使用燈號</span></div><div class='alive-grid'>{alive_html}</div></div>
   <div class='section'><div class='section-title'>其他狀態資訊 <span class='section-note'>非 alive 不使用燈號</span></div><div class='info-grid'>{info_html}</div></div>
 </div>
