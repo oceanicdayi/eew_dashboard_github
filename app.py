@@ -5,6 +5,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+import folium
 import gradio as gr
 import pandas as pd
 import plotly.graph_objects as go
@@ -18,7 +19,8 @@ STATUS_DATASET_ID = "oceanicdayi/eew_status"
 WAVEFORM_DATASET_ID = "oceanicdayi/eew_hermes_dashboard"
 DEFAULT_STATUS = "status/eew_status_report.json"
 DEFAULT_STATUS_ALT = "eew_status_report.json"
-DEFAULT_WAVEFORM = "waveforms/rolling.json"
+WAVEFORM_PREFIX = "tsmip/"
+DEFAULT_WAVEFORM = "tsmip/rolling.json"
 MAX_TRACES = 10
 MAX_POINTS = 2500
 
@@ -66,12 +68,11 @@ def status_choices():
 
 def waveform_choices():
     files = waveform_files()
-    choices = [DEFAULT_WAVEFORM]
-    choices += [
+    tsmip = [
         f for f in sorted(files, reverse=True)
-        if f.startswith("waveforms/") and f.lower().endswith((".json", ".csv", ".txt")) and f not in choices
+        if f.startswith(WAVEFORM_PREFIX) and f.lower().endswith((".json", ".csv", ".txt"))
     ]
-    return choices or ["demo://synthetic"]
+    return tsmip or [DEFAULT_WAVEFORM, "demo://synthetic"]
 
 
 def refresh_status():
@@ -83,7 +84,7 @@ def refresh_status():
 def refresh_waveforms():
     waveform_files.cache_clear()
     choices = waveform_choices()
-    return gr.update(choices=choices, value=choices[0]), f"已重新讀取 {WAVEFORM_DATASET_ID}：{len(choices)} 筆"
+    return gr.update(choices=choices, value=choices[0]), f"已重新讀取 {WAVEFORM_DATASET_ID}/{WAVEFORM_PREFIX}：{len(choices)} 筆"
 
 
 def load_status(source):
@@ -288,47 +289,60 @@ def event_info_html(event, source_label):
 """
 
 
-def event_map_figure(event):
-    fig = go.Figure()
+def folium_map_html(event):
     if not event or event.get("lat") is None or event.get("lon") is None:
-        fig.add_annotation(text="無可繪製的地震事件座標", x=.5, y=.5, showarrow=False)
-        fig.update_layout(height=520, template="plotly_white")
-        return fig
+        return "<div style='padding:16px;border-radius:16px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-weight:800'>無可繪製的地震事件座標</div>"
 
     lat = event["lat"]
     lon = event["lon"]
     mag = event.get("magnitude")
     dep = event.get("depth_km")
-    marker_size = max(16, min(34, 10 + (mag or 0) * 4))
     mag_text = f"{mag:.2f}" if isinstance(mag, (int, float)) else "—"
     dep_text = f"{dep:.1f}" if isinstance(dep, (int, float)) else "—"
-    hover = f"震央<br>時間：{event.get('time') or '—'}<br>規模：{mag_text}<br>深度：{dep_text} km<br>座標：{lat:.4f}, {lon:.4f}"
+    radius = max(8, min(22, 6 + (mag or 0) * 2.5))
 
-    fig.add_trace(go.Scattermapbox(
-        lat=[lat], lon=[lon], mode="markers+text", text=["震央"], textposition="top center",
-        marker={"size": marker_size, "color": "#ef4444", "opacity": 0.92},
-        hovertext=[hover], hoverinfo="text", name="震央"
-    ))
-    stations = event.get("stations") or []
-    valid_stations = [s for s in stations if s.get("lat") is not None and s.get("lon") is not None]
-    if valid_stations:
-        fig.add_trace(go.Scattermapbox(
-            lat=[s["lat"] for s in valid_stations],
-            lon=[s["lon"] for s in valid_stations],
-            mode="markers",
-            marker={"size": 8, "color": "#2563eb", "opacity": 0.72},
-            hovertext=[f"測站：{s.get('station', 'station')}" for s in valid_stations],
-            hoverinfo="text",
-            name="測站",
-        ))
-    fig.update_layout(
-        title="地震事件 Plotly 地圖",
-        height=560,
-        margin={"l": 0, "r": 0, "t": 52, "b": 0},
-        mapbox={"style": "open-street-map", "center": {"lat": lat, "lon": lon}, "zoom": 7.2},
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0},
+    fmap = folium.Map(location=[lat, lon], zoom_start=8, tiles="OpenStreetMap", control_scale=True)
+    popup = folium.Popup(
+        f"<b>震央</b><br>時間：{esc(event.get('time') or '—')}<br>規模：M {mag_text}<br>深度：{dep_text} km<br>座標：{lat:.4f}, {lon:.4f}",
+        max_width=320,
     )
-    return fig
+    folium.CircleMarker(
+        location=[lat, lon],
+        radius=radius,
+        color="#b91c1c",
+        weight=3,
+        fill=True,
+        fill_color="#ef4444",
+        fill_opacity=0.72,
+        tooltip="震央",
+        popup=popup,
+    ).add_to(fmap)
+    folium.Marker(
+        location=[lat, lon],
+        icon=folium.Icon(color="red", icon="exclamation-sign"),
+        tooltip="震央",
+    ).add_to(fmap)
+
+    for station in event.get("stations") or []:
+        sta_lat = station.get("lat")
+        sta_lon = station.get("lon")
+        if sta_lat is None or sta_lon is None:
+            continue
+        name = station.get("station", "station")
+        folium.CircleMarker(
+            location=[sta_lat, sta_lon],
+            radius=4,
+            color="#1d4ed8",
+            weight=2,
+            fill=True,
+            fill_color="#3b82f6",
+            fill_opacity=0.65,
+            tooltip=f"測站：{esc(name)}",
+        ).add_to(fmap)
+
+    folium.LayerControl().add_to(fmap)
+    map_html = fmap.get_root().render()
+    return f"<iframe srcdoc=\"{html.escape(map_html, quote=True)}\" style=\"width:100%;height:560px;border:0;border-radius:18px;box-shadow:0 8px 22px rgba(15,23,42,.08);\"></iframe>"
 
 
 def render_event(source):
@@ -339,18 +353,18 @@ def render_event(source):
             payload = json.load(f)
         label = f"fallback: {exc}"
     event = event_from_payload(payload)
-    return event_info_html(event, label), event_map_figure(event)
+    return event_info_html(event, label), folium_map_html(event)
 
 
 def floats(values, limit=50000):
     out = []
-    for v in values:
+    for value in values:
         if len(out) >= limit:
             break
         try:
-            if v is None or (isinstance(v, float) and math.isnan(v)):
+            if value is None or (isinstance(value, float) and math.isnan(value)):
                 continue
-            out.append(float(v))
+            out.append(float(value))
         except Exception:
             pass
     return out
@@ -368,14 +382,14 @@ def from_records(records, prefix="records"):
     skip = {"time", "t", "timestamp", "datetime", "sec", "second", "seconds", "sample", "index"}
     data = {}
     for row in records:
-        for k, v in row.items():
-            if str(k).lower() in skip:
+        for key, value in row.items():
+            if str(key).lower() in skip:
                 continue
             try:
-                data.setdefault(str(k), []).append(float(v))
+                data.setdefault(str(key), []).append(float(value))
             except Exception:
                 pass
-    return [{"label": f"{prefix}.{k}", "y": v} for k, v in list(data.items())[:MAX_TRACES] if len(v) >= 8]
+    return [{"label": f"{prefix}.{key}", "y": value} for key, value in list(data.items())[:MAX_TRACES] if len(value) >= 8]
 
 
 def find_series(obj, prefix="", found=None, depth=0):
@@ -386,21 +400,21 @@ def find_series(obj, prefix="", found=None, depth=0):
     if isinstance(obj, list):
         rec = from_records(obj, prefix or "records")
         if rec:
-            found.extend(rec[:MAX_TRACES-len(found)])
+            found.extend(rec[:MAX_TRACES - len(found)])
             return found
         y = floats(obj)
-        if len(y) >= max(8, len(obj)//2):
-            found.append({"label": prefix or f"trace_{len(found)+1}", "y": y})
+        if len(y) >= max(8, len(obj) // 2):
+            found.append({"label": prefix or f"trace_{len(found) + 1}", "y": y})
         else:
             for i, item in enumerate(obj[:80]):
-                find_series(item, f"{prefix}[{i}]" if prefix else f"[{i}]", found, depth+1)
+                find_series(item, f"{prefix}[{i}]" if prefix else f"[{i}]", found, depth + 1)
                 if len(found) >= MAX_TRACES:
                     break
     elif isinstance(obj, dict):
         keys = ["samples", "data", "waveform", "waveforms", "values", "amplitude", "acc", "velocity", "displacement", "z", "n", "e", "HLZ", "HLN", "HLE", "stations", "channels", "traces"]
-        for k in keys + [k for k in obj.keys() if k not in keys]:
-            if k in obj:
-                find_series(obj[k], f"{prefix}.{k}" if prefix else str(k), found, depth+1)
+        for key in keys + [key for key in obj.keys() if key not in keys]:
+            if key in obj:
+                find_series(obj[key], f"{prefix}.{key}" if prefix else str(key), found, depth + 1)
                 if len(found) >= MAX_TRACES:
                     break
     return found
@@ -413,7 +427,7 @@ def load_waveform(path):
     if path.lower().endswith(".csv"):
         df = pd.read_csv(local)
         numeric = df.select_dtypes(include="number")
-        series = [{"label": str(c), "y": floats(numeric[c].tolist())} for c in list(numeric.columns)[:MAX_TRACES]]
+        series = [{"label": str(col), "y": floats(numeric[col].tolist())} for col in list(numeric.columns)[:MAX_TRACES]]
     elif path.lower().endswith(".json"):
         with open(local, "r", encoding="utf-8") as f:
             series = find_series(json.load(f))
@@ -428,10 +442,10 @@ def demo_series():
     for j in range(10):
         y = []
         for i in range(900):
-            pulse = math.exp(-((i-260-j*10)**2)/9500) * math.sin(i/(4.5+j*.08))
-            coda = .25 * math.exp(-max(0, i-360)/260) * math.sin(i/(10+j*.3))
-            y.append(pulse + coda + j*.04)
-        series.append({"label": f"demo_trace_{j+1}", "y": y})
+            pulse = math.exp(-((i - 260 - j * 10) ** 2) / 9500) * math.sin(i / (4.5 + j * .08))
+            coda = .25 * math.exp(-max(0, i - 360) / 260) * math.sin(i / (10 + j * .3))
+            y.append(pulse + coda + j * .04)
+        series.append({"label": f"demo_trace_{j + 1}", "y": y})
     return series
 
 
@@ -455,7 +469,7 @@ def trace_stats(label, y):
 def plot_waveform(source):
     try:
         series, label = load_waveform(source)
-        msg = f"✅ 已載入 {label}，波形分開繪製並附統計資訊。"
+        msg = f"✅ 已載入 {label}，來源為 {WAVEFORM_DATASET_ID}/{WAVEFORM_PREFIX}，波形分開繪製並附統計資訊。"
     except Exception as exc:
         series, label = demo_series(), "demo://synthetic fallback"
         msg = f"⚠️ 遠端波形讀取失敗，改顯示示範資料：{exc}"
@@ -466,7 +480,7 @@ def plot_waveform(source):
         raw_y = floats(item.get("y", []))
         y = downsample(raw_y)
         if len(y) >= 2:
-            trace_label = str(item.get("label") or f"trace_{len(clean)+1}")
+            trace_label = str(item.get("label") or f"trace_{len(clean) + 1}")
             clean.append({"label": trace_label, "y": y})
             stats_rows.append(trace_stats(trace_label, raw_y))
 
@@ -498,7 +512,7 @@ status_opts = status_choices()
 wave_opts = waveform_choices()
 
 with gr.Blocks(title="EEW Dashboard") as demo:
-    gr.Markdown("# EEW Dashboard\n系統狀態、地震事件與靜態波形儀表板。地震事件使用 Plotly 地圖呈現震央與測站位置。")
+    gr.Markdown("# EEW Dashboard\n系統狀態、地震事件與靜態波形儀表板。地震事件使用 Folium 地圖呈現；波形讀取 `oceanicdayi/eew_hermes_dashboard/tsmip`。")
     with gr.Tab("系統狀態"):
         with gr.Row():
             s = gr.Dropdown(choices=status_opts, value=status_opts[0], label="Status file")
@@ -517,7 +531,7 @@ with gr.Blocks(title="EEW Dashboard") as demo:
             el = gr.Button("載入事件")
         em = gr.Markdown()
         event_info = gr.HTML()
-        event_map = gr.Plot(label="Plotly earthquake map")
+        event_map = gr.HTML(label="Folium earthquake map")
         er.click(refresh_status, outputs=[es, em])
         el.click(render_event, inputs=es, outputs=[event_info, event_map])
         es.change(render_event, inputs=es, outputs=[event_info, event_map])
