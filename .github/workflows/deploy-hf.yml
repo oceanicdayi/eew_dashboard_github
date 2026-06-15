@@ -1,0 +1,43 @@
+name: Deploy to Hugging Face Space
+
+# push 到 main（或手動觸發）時：先跑驗收測試，通過才同步到 HF Space。
+on:
+  push:
+    branches: [main]
+    paths:                      # 只在這些檔案變動時才部署
+      - "app.py"
+      - "requirements.txt"
+      - "test_loop.py"
+      - "deploy.py"
+      - "fixtures/**"
+      - ".github/workflows/deploy-hf.yml"
+  workflow_dispatch:            # 也可在 Actions 頁手動觸發
+
+concurrency:                    # 避免同時多次部署互相覆蓋
+  group: deploy-hf
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安裝相依套件
+        run: pip install -r requirements.txt
+
+      - name: 驗收測試（replay）
+        env:
+          EEW_DATA_SOURCE: replay
+        run: python test_loop.py
+
+      - name: 部署到 HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}        # GitHub repo Settings → Secrets 設定
+          EEW_SPACE_ID: oceanicdayi/Eew_dashboard  # 要改 Space 改這裡
+          EEW_SKIP_PREDEPLOY_TEST: "1"             # 上一步已測，不重複
+        run: python deploy.py
