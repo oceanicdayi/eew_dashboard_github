@@ -13,10 +13,11 @@ from huggingface_hub import hf_hub_download, list_repo_files
 HERE = Path(__file__).resolve().parent
 FIXTURES = HERE / "fixtures"
 
-DATASET_ID = "oceanicdayi/eew_hermes_dashboard"
-DEFAULT_STATUS_PATH = "status/eew_status_report.json"
+STATUS_DATASET_ID = "oceanicdayi/eew_status"
+WAVEFORM_DATASET_ID = "oceanicdayi/eew_hermes_dashboard"
+DEFAULT_STATUS_CANDIDATES = ["status/eew_status_report.json", "eew_status_report.json"]
+DEFAULT_STATUS_PATH = DEFAULT_STATUS_CANDIDATES[0]
 DEFAULT_WAVEFORM_PATH = "waveforms/rolling.json"
-STATUS_PREFIX = "status/"
 WAVEFORM_PREFIX = "waveforms/"
 SUPPORTED_WAVEFORM_SUFFIXES = (".csv", ".json", ".txt")
 
@@ -30,7 +31,14 @@ def _as_float(value):
         if value is None:
             return None
         if isinstance(value, str):
-            value = value.strip().replace("km", "").replace("秒", "").replace("sec", "").replace("s", "")
+            value = (
+                value.strip()
+                .replace("km", "")
+                .replace("秒", "")
+                .replace("sec", "")
+                .replace("s", "")
+                .replace("%", "")
+            )
         return float(value)
     except (TypeError, ValueError):
         return None
@@ -43,56 +51,88 @@ def _format_num(value, digits=2, suffix=""):
     return f"{value:.{digits}f}{suffix}"
 
 
-def _load_json(path: Path):
+def _load_local_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
 @lru_cache(maxsize=1)
-def _repo_files():
+def _status_repo_files():
     try:
-        return list_repo_files(DATASET_ID, repo_type="dataset")
+        return list_repo_files(STATUS_DATASET_ID, repo_type="dataset")
     except Exception:
         return []
 
 
-def _ordered_choices(prefix, suffixes, preferred):
-    found = sorted([f for f in _repo_files() if f.startswith(prefix) and f.lower().endswith(suffixes)], reverse=True)
-    choices = [preferred] if preferred else []
-    choices.extend([item for item in found if item not in choices])
-    return choices
+@lru_cache(maxsize=1)
+def _waveform_repo_files():
+    try:
+        return list_repo_files(WAVEFORM_DATASET_ID, repo_type="dataset")
+    except Exception:
+        return []
 
 
 def _status_choices():
-    return _ordered_choices(STATUS_PREFIX, (".json",), DEFAULT_STATUS_PATH) or ["fixtures://normal_event.json"]
+    files = _status_repo_files()
+    json_files = sorted([f for f in files if f.lower().endswith(".json")], reverse=True)
+    choices = []
+    for preferred in DEFAULT_STATUS_CANDIDATES:
+        if preferred in files and preferred not in choices:
+            choices.append(preferred)
+    if not choices:
+        choices.append(DEFAULT_STATUS_PATH)
+    choices.extend([f for f in json_files if f not in choices])
+    return choices or ["fixtures://normal_event.json"]
 
 
 def _waveform_choices():
-    return _ordered_choices(WAVEFORM_PREFIX, SUPPORTED_WAVEFORM_SUFFIXES, DEFAULT_WAVEFORM_PATH) or ["demo://synthetic"]
+    files = _waveform_repo_files()
+    waveforms = sorted([
+        f for f in files
+        if f.startswith(WAVEFORM_PREFIX) and f.lower().endswith(SUPPORTED_WAVEFORM_SUFFIXES)
+    ], reverse=True)
+    choices = []
+    if DEFAULT_WAVEFORM_PATH in files:
+        choices.append(DEFAULT_WAVEFORM_PATH)
+    else:
+        choices.append(DEFAULT_WAVEFORM_PATH)
+    choices.extend([f for f in waveforms if f not in choices])
+    return choices or ["demo://synthetic"]
 
 
 def refresh_status_choices():
-    _repo_files.cache_clear()
+    _status_repo_files.cache_clear()
     choices = _status_choices()
-    return gr.update(choices=choices, value=choices[0]), f"已重新讀取狀態清單：{len(choices)} 筆"
+    return gr.update(choices=choices, value=choices[0]), f"已重新讀取系統狀態清單：{len(choices)} 筆，來源 {STATUS_DATASET_ID}"
 
 
 def refresh_waveform_choices():
-    _repo_files.cache_clear()
+    _waveform_repo_files.cache_clear()
     choices = _waveform_choices()
-    return gr.update(choices=choices, value=choices[0]), f"已重新讀取波形清單：{len(choices)} 筆"
+    return gr.update(choices=choices, value=choices[0]), f"已重新讀取波形清單：{len(choices)} 筆，來源 {WAVEFORM_DATASET_ID}"
 
 
-def _download_json(repo_path):
-    local = hf_hub_download(repo_id=DATASET_ID, filename=repo_path, repo_type="dataset")
+def _download_status_json(repo_path):
+    local = hf_hub_download(repo_id=STATUS_DATASET_ID, filename=repo_path, repo_type="dataset")
     with open(local, "r", encoding="utf-8") as f:
         return json.load(f), repo_path
 
 
 def _load_status_payload(source):
     if source and source.startswith("fixtures://"):
-        return _load_json(FIXTURES / source.split("://", 1)[1]), source
-    return _download_json(source or DEFAULT_STATUS_PATH)
+        return _load_local_json(FIXTURES / source.split("://", 1)[1]), source
+
+    candidates = [source] if source else []
+    candidates.extend([p for p in DEFAULT_STATUS_CANDIDATES if p not in candidates])
+
+    last_error = None
+    for candidate in candidates:
+        try:
+            return _download_status_json(candidate)
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise RuntimeError(f"無法從 {STATUS_DATASET_ID} 讀取系統狀態：{last_error}")
 
 
 def _first_value(obj, keys):
@@ -113,6 +153,7 @@ def _event_line_from_header(payload):
     head = header.get("head") or []
     if not isinstance(head, list):
         return "", None, header.get("file") or ""
+
     report_time = None
     event_line = ""
     for line in head:
@@ -153,38 +194,36 @@ def _event_from_status(payload):
         except IndexError:
             pass
 
-    candidate_keys = ["latest_event", "event", "latest_report", "eew_event", "earthquake", "summary"]
-    candidates = [payload.get(k) for k in candidate_keys if isinstance(payload.get(k), dict)]
-    for candidate in candidates:
-        lat = _first_value(candidate, ["lat", "latitude", "epicenter_lat", "epi_lat"])
-        lon = _first_value(candidate, ["lon", "lng", "longitude", "epicenter_lon", "epi_lon"])
-        depth = _first_value(candidate, ["depth", "depth_km", "dep"])
-        mall = _first_value(candidate, ["Mall", "mall", "magnitude", "mag"])
-        mpd = _first_value(candidate, ["Mpd", "mpd"])
-        mtc = _first_value(candidate, ["Mtc", "mtc"])
-        ptime = _first_value(candidate, ["process_time", "processing_time", "latency", "elapsed"])
-        rtime = _first_value(candidate, ["report_time", "reporting_time", "time", "origin_time"])
-        if lat is not None:
-            event["lat"] = _as_float(lat)
-        if lon is not None:
-            event["lon"] = _as_float(lon)
-        if depth is not None:
-            event["depth_km"] = _as_float(depth)
-        if mall is not None:
-            event["Mall"] = _as_float(mall)
-        if mpd is not None:
-            event["Mpd"] = _as_float(mpd)
-        if mtc is not None:
-            event["Mtc"] = _as_float(mtc)
-        if ptime is not None:
-            event["process_time"] = _as_float(ptime)
-        if rtime is not None:
-            event["report_time"] = rtime
+    candidate_keys = [
+        "latest_event", "event", "latest_report", "eew_event", "earthquake",
+        "summary", "latest_event_summary", "eew_summary",
+    ]
+    for candidate in [payload.get(k) for k in candidate_keys if isinstance(payload.get(k), dict)]:
+        mapping = {
+            "lat": ["lat", "latitude", "epicenter_lat", "epi_lat"],
+            "lon": ["lon", "lng", "longitude", "epicenter_lon", "epi_lon"],
+            "depth_km": ["depth", "depth_km", "dep"],
+            "Mall": ["Mall", "mall", "magnitude", "mag"],
+            "Mpd": ["Mpd", "mpd"],
+            "Mtc": ["Mtc", "mtc"],
+            "process_time": ["process_time", "processing_time", "latency", "elapsed"],
+            "report_time": ["report_time", "reporting_time", "time", "origin_time"],
+        }
+        for target, keys in mapping.items():
+            value = _first_value(candidate, keys)
+            if value is not None:
+                event[target] = value if target == "report_time" else _as_float(value)
     return event
 
 
 def _container_rows(payload):
-    containers = payload.get("containers") or payload.get("container_status") or payload.get("container") or {}
+    containers = (
+        payload.get("containers")
+        or payload.get("container_status")
+        or payload.get("container")
+        or payload.get("docker")
+        or {}
+    )
     rows = []
     if isinstance(containers, dict):
         for name, info in containers.items():
@@ -212,7 +251,14 @@ def _container_rows(payload):
 def _disk_rows(payload):
     disk = payload.get("disk_root") or payload.get("disk_usage") or payload.get("disk")
     if isinstance(disk, list) and len(disk) >= 6:
-        return [{"device": disk[0], "size": disk[1], "used": disk[2], "available": disk[3], "use_percent": disk[4], "mount": disk[5]}]
+        return [{
+            "device": disk[0],
+            "size": disk[1],
+            "used": disk[2],
+            "available": disk[3],
+            "use_percent": disk[4],
+            "mount": disk[5],
+        }]
     if isinstance(disk, dict):
         return [{
             "device": disk.get("device") or disk.get("filesystem") or "/",
@@ -227,7 +273,7 @@ def _disk_rows(payload):
 
 def _status_class(text):
     text = str(text or "").lower()
-    if any(k in text for k in ["up", "ok", "running", "healthy", "運行", "正常", "available", "exists"]):
+    if any(k in text for k in ["up", "ok", "running", "healthy", "運行", "正常", "available", "exists", "success"]):
         return "ok"
     if any(k in text for k in ["warn", "warning", "partial", "警告"]):
         return "warn"
@@ -244,18 +290,48 @@ def _pct(value):
 def _module_rows(payload):
     rows = []
     for row in _container_rows(payload):
-        rows.append({"item": row["module"], "status": row["status"], "detail": row.get("ports") or row.get("image") or ""})
+        rows.append({
+            "item": row["module"],
+            "status": row["status"],
+            "detail": row.get("ports") or row.get("image") or "",
+        })
+
     rep_files = payload.get("latest_rep_files")
     if isinstance(rep_files, list):
-        rows.append({"item": ".rep 即時檔案", "status": f"{len(rep_files)} files", "detail": rep_files[0] if rep_files else "無最新 .rep 檔"})
+        rows.append({
+            "item": ".rep 即時檔案",
+            "status": f"{len(rep_files)} files",
+            "detail": rep_files[0] if rep_files else "無最新 .rep 檔",
+        })
+
     header = payload.get("latest_rep_header") or {}
     if isinstance(header, dict) and header.get("file"):
-        rows.append({"item": "Earthworm EEW header", "status": "available", "detail": header.get("file")})
+        rows.append({
+            "item": "Earthworm EEW header",
+            "status": "available",
+            "detail": header.get("file"),
+        })
+
     warning = payload.get("earthworm_log_warning")
-    rows.append({"item": "Earthworm log", "status": "warning" if warning else "ok", "detail": warning or "未偵測到 warning"})
-    files = _repo_files()
-    rows.append({"item": DEFAULT_STATUS_PATH, "status": "exists" if DEFAULT_STATUS_PATH in files else "not confirmed", "detail": "HF Dataset status report"})
-    rows.append({"item": DEFAULT_WAVEFORM_PATH, "status": "exists" if DEFAULT_WAVEFORM_PATH in files else "not confirmed", "detail": "rolling waveform file"})
+    rows.append({
+        "item": "Earthworm log",
+        "status": "warning" if warning else "ok",
+        "detail": warning or "未偵測到 warning",
+    })
+
+    status_files = _status_repo_files()
+    waveform_files = _waveform_repo_files()
+    status_exists = any(path in status_files for path in DEFAULT_STATUS_CANDIDATES)
+    rows.append({
+        "item": "系統狀態資料集",
+        "status": "exists" if status_exists else "not confirmed",
+        "detail": STATUS_DATASET_ID,
+    })
+    rows.append({
+        "item": DEFAULT_WAVEFORM_PATH,
+        "status": "exists" if DEFAULT_WAVEFORM_PATH in waveform_files else "not confirmed",
+        "detail": WAVEFORM_DATASET_ID,
+    })
     return rows
 
 
@@ -266,9 +342,9 @@ def _cards_html(payload, source):
     earthworm_status = earthworm.get("status") if earthworm else "not found"
     disk = (_disk_rows(payload) or [{}])[0]
     disk_percent = _pct(disk.get("use_percent"))
-    job_id = payload.get("job_id") or payload.get("cron_job_id") or "42d2a1b10a19"
-    commit = payload.get("commit") or payload.get("commit_sha") or payload.get("hf_commit") or payload.get("upload_commit") or "6cde92fce17c7e48273bfefb56f44bd4e199c618"
-    collected = payload.get("host_time") or payload.get("collected_utc") or "—"
+    job_id = payload.get("job_id") or payload.get("cron_job_id") or "—"
+    commit = payload.get("commit") or payload.get("commit_sha") or payload.get("hf_commit") or payload.get("upload_commit") or "—"
+    collected = payload.get("host_time") or payload.get("collected_utc") or payload.get("time") or "—"
 
     module_cards = []
     for row in _module_rows(payload)[:10]:
@@ -293,11 +369,11 @@ def _cards_html(payload, source):
 <div class='wrap'>
   <div class='hero'>
     <h2>HF Dataset EEW Status Upload</h2>
-    <div class='sub'>{_esc(source)}</div>
+    <div class='sub'>系統狀態來源：{_esc(STATUS_DATASET_ID)} / {_esc(source)}</div>
     <div class='pills'>
-      <div class='pill'>容器：{_esc(earthworm_status)}</div>
+      <div class='pill'>earthworm_eew：{_esc(earthworm_status)}</div>
       <div class='pill'>Job ID：{_esc(job_id)}</div>
-      <div class='pill'>Dataset：{_esc(DATASET_ID)}</div>
+      <div class='pill'>波形來源：{_esc(WAVEFORM_DATASET_ID)}</div>
     </div>
   </div>
   <div class='card'>
@@ -321,10 +397,12 @@ def _cards_html(payload, source):
     <div class='muted'>used {_esc(disk.get('used'))} / {_esc(disk.get('size'))}，available {_esc(disk.get('available'))}，mount {_esc(disk.get('mount'))}</div>
   </div>
   <div class='card'>
-    <h3>上傳資訊</h3>
-    <div class='muted'>已上傳：{_esc(DEFAULT_STATUS_PATH)}</div>
+    <h3>資料集與上傳資訊</h3>
+    <div class='muted'>系統狀態 Dataset：{_esc(STATUS_DATASET_ID)}</div>
+    <div class='muted'>狀態檔：{_esc(source)}</div>
     <div class='muted'>Commit：{_esc(commit)}</div>
-    <div class='muted'>遠端波形：{_esc(DEFAULT_WAVEFORM_PATH)}</div>
+    <div class='muted'>波形 Dataset：{_esc(WAVEFORM_DATASET_ID)}</div>
+    <div class='muted'>預設波形：{_esc(DEFAULT_WAVEFORM_PATH)}</div>
     <div class='muted'>資料時間：{_esc(collected)}</div>
   </div>
 </div>
@@ -335,7 +413,7 @@ def render_system_status(status_source):
     try:
         payload, label = _load_status_payload(status_source)
     except Exception as exc:
-        payload = _load_json(FIXTURES / "normal_event.json")
+        payload = _load_local_json(FIXTURES / "normal_event.json")
         label = f"fixtures://normal_event.json（遠端讀取失敗：{exc}）"
     return (
         _cards_html(payload, label),
@@ -348,9 +426,10 @@ def render_system_status(status_source):
 def render_event_map(status_source):
     try:
         payload, label = _load_status_payload(status_source)
-    except Exception:
-        payload = _load_json(FIXTURES / "normal_event.json")
-        label = "fixtures://normal_event.json"
+    except Exception as exc:
+        payload = _load_local_json(FIXTURES / "normal_event.json")
+        label = f"fixtures://normal_event.json（遠端讀取失敗：{exc}）"
+
     event = _event_from_status(payload)
     lat = event.get("lat") or 23.7
     lon = event.get("lon") or 121.0
@@ -362,6 +441,7 @@ def render_event_map(status_source):
     folium.Marker([lat, lon], tooltip=f"{event.get('report_time') or label} | Mall {mag:.2f}" if mag else label).add_to(fmap)
 
     summary = pd.DataFrame([
+        {"field": "status_dataset", "value": STATUS_DATASET_ID},
         {"field": "source", "value": label},
         {"field": "report_time", "value": event.get("report_time")},
         {"field": "latitude", "value": event.get("lat")},
@@ -372,7 +452,7 @@ def render_event_map(status_source):
         {"field": "Mtc", "value": event.get("Mtc")},
         {"field": "process_time", "value": event.get("process_time")},
     ])
-    return "✅ 已載入最新 HF Dataset 事件", summary, fmap._repr_html_(), json.dumps(payload, ensure_ascii=False, indent=2)
+    return "✅ 已從 oceanicdayi/eew_status 載入最新事件", summary, fmap._repr_html_(), json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def _coerce_floats(values, limit=6000):
@@ -485,7 +565,7 @@ def _synthetic_waveform():
 def _load_waveform_series(path):
     if not path or path == "demo://synthetic":
         return _synthetic_waveform(), "demo://synthetic"
-    local = hf_hub_download(repo_id=DATASET_ID, filename=path, repo_type="dataset")
+    local = hf_hub_download(repo_id=WAVEFORM_DATASET_ID, filename=path, repo_type="dataset")
     low = path.lower()
     if low.endswith(".csv"):
         series = _series_from_csv(local)
@@ -571,7 +651,7 @@ def _waveform_html(series, label):
       {''.join(paths)}
     </svg>
   </div>
-  <div class='caption'>預設讀取 waveforms/rolling.json；靜態展示可避免手機黑畫面。</div>
+  <div class='caption'>預設讀取 {DEFAULT_WAVEFORM_PATH}；靜態展示可避免手機黑畫面。</div>
 </div>
 """
 
@@ -594,7 +674,7 @@ status_choices = _status_choices()
 waveform_choices = _waveform_choices()
 
 with gr.Blocks(title="EEW Dashboard") as demo:
-    gr.Markdown("# EEW Dashboard\nHF Dataset EEW 狀態、Earthworm 模組監控、最新事件與靜態波形檢視")
+    gr.Markdown("# EEW Dashboard\n系統狀態讀取 `oceanicdayi/eew_status`；波形讀取 `oceanicdayi/eew_hermes_dashboard`。")
 
     with gr.Tab("系統狀態"):
         gr.Markdown("## Cronjob Response: HF Dataset EEW Status Upload")
@@ -613,7 +693,7 @@ with gr.Blocks(title="EEW Dashboard") as demo:
         demo.load(render_system_status, inputs=status_source, outputs=[cards, module_table, disk_table, event_table])
 
     with gr.Tab("事件地圖"):
-        gr.Markdown("## 最新事件震央地圖\n預設使用 `status/eew_status_report.json`。")
+        gr.Markdown("## 最新事件震央地圖\n預設使用 `oceanicdayi/eew_status` 的狀態檔。")
         with gr.Row():
             map_source = gr.Dropdown(choices=status_choices, value=status_choices[0], label="Status file")
             map_refresh = gr.Button("載入地圖")
@@ -626,7 +706,7 @@ with gr.Blocks(title="EEW Dashboard") as demo:
         demo.load(render_event_map, inputs=map_source, outputs=[map_status, summary, map_html, raw])
 
     with gr.Tab("靜態波形"):
-        gr.Markdown("## 波形資料\n預設使用 `waveforms/rolling.json`。已改為靜態展示，避免黑畫面。")
+        gr.Markdown("## 波形資料\n預設使用 `waveforms/rolling.json`，來源 `oceanicdayi/eew_hermes_dashboard`。")
         with gr.Row():
             wave_source = gr.Dropdown(choices=waveform_choices, value=waveform_choices[0], label="Waveform file")
             wave_refresh = gr.Button("重新讀取波形清單")
