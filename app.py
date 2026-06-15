@@ -150,7 +150,6 @@ def _series_from_csv(path: str):
     df = pd.read_csv(path)
     numeric = df.select_dtypes(include="number")
     if numeric.empty:
-        # Try whitespace-delimited numeric files accidentally saved as CSV.
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             values = _coerce_floats(re.split(r"[\s,]+", f.read()))
         return [{"label": "waveform", "y": values}] if values else []
@@ -239,6 +238,23 @@ def _load_waveform_series(repo_path: str):
     return series, repo_path
 
 
+def _path_from_values(values, width, height, pad, min_y, max_y):
+    if not values:
+        return ""
+    if min_y == max_y:
+        min_y -= 1
+        max_y += 1
+    usable_w = width - pad * 1.5
+    usable_h = height - pad * 2
+    coords = []
+    denom = max(1, len(values) - 1)
+    for idx, value in enumerate(values):
+        x = pad + (idx / denom) * usable_w
+        y = height - pad - ((value - min_y) / (max_y - min_y)) * usable_h
+        coords.append(f"{x:.2f},{y:.2f}")
+    return "M " + " L ".join(coords)
+
+
 def _waveform_html(series, source_label: str):
     clean_series = []
     for item in series[:3]:
@@ -249,19 +265,74 @@ def _waveform_html(series, source_label: str):
     if not clean_series:
         return "<div style='padding:1rem;border:1px solid #ddd;border-radius:12px'>無可繪製的波形資料。</div>"
 
-    packet = {
-        "source": source_label,
-        "series": clean_series,
-    }
-    payload = json.dumps(packet, ensure_ascii=False)
+    width = 1100
+    height = 360
+    pad = 42
+    colors = ["#63e6be", "#74c0fc", "#ffd43b"]
+    all_values = [value for item in clean_series for value in item["y"]]
+    min_y = min(all_values)
+    max_y = max(all_values)
+    if min_y == max_y:
+        min_y -= 1
+        max_y += 1
+
     elem_id = f"wave_{uuid.uuid4().hex}"
     title = html_lib.escape(source_label)
+    y_max = html_lib.escape(f"{max_y:.4g}")
+    y_min = html_lib.escape(f"{min_y:.4g}")
 
-    return f"""
+    grid_lines = []
+    for i in range(7):
+        y = pad + i * (height - pad * 2) / 6
+        grid_lines.append(f"<line x1='{pad}' y1='{y:.2f}' x2='{width - pad / 2}' y2='{y:.2f}' class='grid' />")
+    for i in range(11):
+        x = pad + i * (width - pad * 1.5) / 10
+        grid_lines.append(f"<line x1='{x:.2f}' y1='{pad / 2}' x2='{x:.2f}' y2='{height - pad}' class='grid' />")
+
+    paths = []
+    legend = []
+    for idx, item in enumerate(clean_series):
+        color = colors[idx % len(colors)]
+        label = html_lib.escape(item["label"])
+        path_d = _path_from_values(item["y"], width, height, pad, min_y, max_y)
+        delay = idx * 0.18
+        duration = 2.4 + min(1.6, len(item["y"]) / 900)
+        paths.append(
+            f'''
+            <path d="{path_d}" class="wave-line" stroke="{color}" pathLength="1000"
+                  stroke-dasharray="1000" stroke-dashoffset="0">
+              <animate attributeName="stroke-dashoffset" from="1000" to="0"
+                       dur="{duration:.2f}s" begin="{delay:.2f}s" fill="freeze" />
+            </path>
+            '''
+        )
+        legend_x = pad + 8 + idx * 175
+        legend.append(
+            f"<g><line x1='{legend_x}' y1='28' x2='{legend_x + 22}' y2='28' stroke='{color}' stroke-width='4' />"
+            f"<text x='{legend_x + 30}' y='32' class='legend'>{label}</text></g>"
+        )
+
+    svg = f'''
+    <svg viewBox="0 0 {width} {height}" preserveAspectRatio="none" role="img"
+         aria-label="Animated waveform">
+      <rect width="{width}" height="{height}" rx="16" class="bg" />
+      {''.join(grid_lines)}
+      <line x1="{pad}" y1="{pad / 2}" x2="{pad}" y2="{height - pad}" class="axis" />
+      <line x1="{pad}" y1="{height - pad}" x2="{width - pad / 2}" y2="{height - pad}" class="axis" />
+      <text x="12" y="24" class="axis-label">Amplitude</text>
+      <text x="{width - 155}" y="{height - 14}" class="axis-label">Samples / time</text>
+      <text x="{pad + 4}" y="{pad - 8}" class="axis-label">{y_max}</text>
+      <text x="{pad + 4}" y="{height - pad - 5}" class="axis-label">{y_min}</text>
+      {''.join(legend)}
+      {''.join(paths)}
+    </svg>
+    '''
+
+    return f'''
 <div id="{elem_id}" class="wave-card">
   <div class="wave-title">動態波形：{title}</div>
-  <canvas width="1100" height="360"></canvas>
-  <div class="wave-caption">波形會由左至右逐步繪製，重新選擇檔案即可重播。</div>
+  <div class="wave-svg-wrap">{svg}</div>
+  <div class="wave-caption">已改用 SVG 原生動畫，不依賴 JavaScript；若瀏覽器停用動畫，線條仍會直接顯示。</div>
 </div>
 <style>
   #{elem_id}.wave-card {{
@@ -271,94 +342,23 @@ def _waveform_html(series, source_label: str):
     background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(245,247,250,.96));
   }}
   #{elem_id} .wave-title {{font-weight: 700; margin-bottom: 8px;}}
-  #{elem_id} canvas {{width: 100%; height: 360px; border-radius: 12px; background: #08111f; display: block;}}
+  #{elem_id} .wave-svg-wrap {{width: 100%; border-radius: 12px; overflow: hidden;}}
+  #{elem_id} svg {{width: 100%; height: 360px; display: block;}}
+  #{elem_id} .bg {{fill: #08111f;}}
+  #{elem_id} .grid {{stroke: rgba(255,255,255,.12); stroke-width: 1;}}
+  #{elem_id} .axis {{stroke: rgba(255,255,255,.45); stroke-width: 1.2;}}
+  #{elem_id} .axis-label {{fill: rgba(255,255,255,.72); font: 14px system-ui, sans-serif;}}
+  #{elem_id} .legend {{fill: rgba(255,255,255,.82); font: 13px system-ui, sans-serif;}}
+  #{elem_id} .wave-line {{
+    fill: none;
+    stroke-width: 2.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    filter: drop-shadow(0 0 4px rgba(99,230,190,.35));
+  }}
   #{elem_id} .wave-caption {{font-size: 13px; color: #667085; margin-top: 8px;}}
 </style>
-<script>
-(() => {{
-  const packet = {payload};
-  const root = document.getElementById("{elem_id}");
-  const canvas = root.querySelector("canvas");
-  const ctx = canvas.getContext("2d");
-  const W = canvas.width;
-  const H = canvas.height;
-  const pad = 42;
-  const colors = ["#63e6be", "#74c0fc", "#ffd43b"];
-  const series = packet.series.map((s, idx) => ({{
-    label: s.label,
-    y: s.y.map(Number).filter(Number.isFinite),
-    color: colors[idx % colors.length]
-  }})).filter(s => s.y.length > 1);
-  const all = series.flatMap(s => s.y);
-  let minY = Math.min(...all);
-  let maxY = Math.max(...all);
-  if (!Number.isFinite(minY) || !Number.isFinite(maxY) || minY === maxY) {{ minY = -1; maxY = 1; }}
-  const maxLen = Math.max(...series.map(s => s.y.length));
-  let frame = 2;
-  const speed = Math.max(3, maxLen / 180);
-
-  function xFor(i, len) {{ return pad + (i / Math.max(1, len - 1)) * (W - pad * 1.5); }}
-  function yFor(v) {{ return H - pad - ((v - minY) / (maxY - minY)) * (H - pad * 2); }}
-
-  function drawGrid() {{
-    ctx.fillStyle = "#08111f";
-    ctx.fillRect(0, 0, W, H);
-    ctx.strokeStyle = "rgba(255,255,255,.12)";
-    ctx.lineWidth = 1;
-    for (let i = 0; i <= 6; i++) {{
-      const y = pad + i * (H - pad * 2) / 6;
-      ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(W - pad / 2, y); ctx.stroke();
-    }}
-    for (let i = 0; i <= 10; i++) {{
-      const x = pad + i * (W - pad * 1.5) / 10;
-      ctx.beginPath(); ctx.moveTo(x, pad / 2); ctx.lineTo(x, H - pad); ctx.stroke();
-    }}
-    ctx.strokeStyle = "rgba(255,255,255,.45)";
-    ctx.beginPath(); ctx.moveTo(pad, pad / 2); ctx.lineTo(pad, H - pad); ctx.lineTo(W - pad / 2, H - pad); ctx.stroke();
-    ctx.fillStyle = "rgba(255,255,255,.72)";
-    ctx.font = "14px system-ui, sans-serif";
-    ctx.fillText("Amplitude", 12, 24);
-    ctx.fillText("Samples / time", W - 150, H - 14);
-  }}
-
-  function drawLegend() {{
-    let x = pad + 8;
-    const y = 28;
-    series.forEach(s => {{
-      ctx.fillStyle = s.color;
-      ctx.fillRect(x, y - 10, 18, 4);
-      ctx.fillStyle = "rgba(255,255,255,.82)";
-      ctx.font = "13px system-ui, sans-serif";
-      ctx.fillText(s.label, x + 24, y - 5);
-      x += 150;
-    }});
-  }}
-
-  function drawWave() {{
-    drawGrid();
-    drawLegend();
-    const visible = Math.floor(frame);
-    series.forEach(s => {{
-      const n = Math.min(visible, s.y.length);
-      if (n < 2) return;
-      ctx.strokeStyle = s.color;
-      ctx.lineWidth = 2.2;
-      ctx.beginPath();
-      ctx.moveTo(xFor(0, s.y.length), yFor(s.y[0]));
-      for (let i = 1; i < n; i++) ctx.lineTo(xFor(i, s.y.length), yFor(s.y[i]));
-      ctx.stroke();
-      const hx = xFor(n - 1, s.y.length);
-      const hy = yFor(s.y[n - 1]);
-      ctx.fillStyle = s.color;
-      ctx.beginPath(); ctx.arc(hx, hy, 4, 0, Math.PI * 2); ctx.fill();
-    }});
-    frame += speed;
-    if (frame <= maxLen + speed) requestAnimationFrame(drawWave);
-  }}
-  drawWave();
-}})();
-</script>
-"""
+'''
 
 
 def render_waveform(repo_path: str):
