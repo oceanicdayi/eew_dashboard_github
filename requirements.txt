@@ -1,3 +1,4 @@
+# Deployment trigger after repository secret was configured.
 gradio==4.44.1
 requests==2.32.3
 folium==0.17.0
