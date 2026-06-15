@@ -1,0 +1,13 @@
+{
+  "collected_utc": "2026-06-12T04:29:45Z",
+  "containers": {
+    "earthworm_eew": "Up 18 hours"
+  },
+  "latest_rep_header": {
+    "file": "params/partial.rep",
+    "head": [
+      "Reporting time   2026/06/12 04:29:30.00  Gap=999 n=1 no_eq=2411"
+    ]
+  },
+  "earthworm_log_tail": ["NO_LOG"]
+}
