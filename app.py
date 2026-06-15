@@ -14,6 +14,8 @@ HERE = Path(__file__).resolve().parent
 FIXTURES = HERE / "fixtures"
 
 DATASET_ID = "oceanicdayi/eew_hermes_dashboard"
+DEFAULT_STATUS_PATH = "status/eew_status_report.json"
+DEFAULT_WAVEFORM_PATH = "waveforms/rolling.json"
 STATUS_PREFIX = "status/"
 WAVEFORM_PREFIX = "waveforms/"
 SUPPORTED_WAVEFORM_SUFFIXES = (".csv", ".json", ".txt")
@@ -23,137 +25,194 @@ def _esc(value):
     return html_lib.escape("" if value is None else str(value))
 
 
+def _as_float(value):
+    try:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.strip().replace("km", "").replace("秒", "").replace("sec", "").replace("s", "")
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_num(value, digits=2, suffix=""):
+    value = _as_float(value)
+    if value is None:
+        return "—"
+    return f"{value:.{digits}f}{suffix}"
+
+
 def _load_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def _fixture_choices():
-    files = sorted(FIXTURES.glob("*.json"))
-    return [p.name for p in files if p.name != "malformed.json"] or ["normal_event.json"]
-
-
 @lru_cache(maxsize=1)
-def _repo_files_cached():
+def _repo_files():
     try:
         return list_repo_files(DATASET_ID, repo_type="dataset")
     except Exception:
         return []
 
 
-def _choices(prefix, suffixes):
-    files = _repo_files_cached()
-    items = [f for f in files if f.startswith(prefix) and f.lower().endswith(suffixes)]
-    return sorted(items, reverse=True)
+def _ordered_choices(prefix, suffixes, preferred):
+    found = sorted([f for f in _repo_files() if f.startswith(prefix) and f.lower().endswith(suffixes)], reverse=True)
+    choices = [preferred] if preferred else []
+    choices.extend([item for item in found if item not in choices])
+    return choices
 
 
-def _status_choices_cached():
-    return _choices(STATUS_PREFIX, (".json",)) or ["fixtures://normal_event.json"]
+def _status_choices():
+    return _ordered_choices(STATUS_PREFIX, (".json",), DEFAULT_STATUS_PATH) or ["fixtures://normal_event.json"]
 
 
-def _waveform_choices_cached():
-    return _choices(WAVEFORM_PREFIX, SUPPORTED_WAVEFORM_SUFFIXES) or ["demo://synthetic"]
+def _waveform_choices():
+    return _ordered_choices(WAVEFORM_PREFIX, SUPPORTED_WAVEFORM_SUFFIXES, DEFAULT_WAVEFORM_PATH) or ["demo://synthetic"]
 
 
 def refresh_status_choices():
-    _repo_files_cached.cache_clear()
-    choices = _status_choices_cached()
+    _repo_files.cache_clear()
+    choices = _status_choices()
     return gr.update(choices=choices, value=choices[0]), f"已重新讀取狀態清單：{len(choices)} 筆"
 
 
 def refresh_waveform_choices():
-    _repo_files_cached.cache_clear()
-    choices = _waveform_choices_cached()
+    _repo_files.cache_clear()
+    choices = _waveform_choices()
     return gr.update(choices=choices, value=choices[0]), f"已重新讀取波形清單：{len(choices)} 筆"
 
 
-def _download_dataset_json(repo_path: str):
+def _download_json(repo_path):
     local = hf_hub_download(repo_id=DATASET_ID, filename=repo_path, repo_type="dataset")
     with open(local, "r", encoding="utf-8") as f:
         return json.load(f), repo_path
 
 
-def _load_status_payload(source: str):
+def _load_status_payload(source):
     if source and source.startswith("fixtures://"):
-        name = source.split("://", 1)[1]
-        return _load_json(FIXTURES / name), source
-    if source:
-        return _download_dataset_json(source)
-    return _load_json(FIXTURES / "normal_event.json"), "fixtures://normal_event.json"
+        return _load_json(FIXTURES / source.split("://", 1)[1]), source
+    return _download_json(source or DEFAULT_STATUS_PATH)
 
 
-def _parse_event(payload: dict) -> dict:
+def _first_value(obj, keys):
+    if not isinstance(obj, dict):
+        return None
+    lower = {str(k).lower(): v for k, v in obj.items()}
+    for key in keys:
+        if key in obj:
+            return obj[key]
+        lk = str(key).lower()
+        if lk in lower:
+            return lower[lk]
+    return None
+
+
+def _event_line_from_header(payload):
     header = payload.get("latest_rep_header") or {}
     head = header.get("head") or []
+    if not isinstance(head, list):
+        return "", None, header.get("file") or ""
+    report_time = None
     event_line = ""
     for line in head:
-        if re.match(r"^\s*\d{4}\s+\d+\s+\d+\s+\d+\s+\d+", str(line)):
-            event_line = str(line)
-            break
+        text = str(line)
+        match = re.search(r"Reporting time\s+([0-9/]{8,10}\s+[0-9:.]+)", text)
+        if match:
+            report_time = match.group(1)
+        if re.match(r"^\s*\d{4}\s+\d+\s+\d+\s+\d+\s+\d+", text):
+            event_line = text
+    return event_line, report_time, header.get("file") or ""
 
+
+def _event_from_status(payload):
+    event_line, report_time, source_file = _event_line_from_header(payload)
     event = {
-        "collected_utc": payload.get("collected_utc", ""),
-        "runner": payload.get("runner", ""),
-        "file": header.get("file", ""),
-        "magnitude": None,
+        "report_time": report_time,
         "lat": None,
         "lon": None,
         "depth_km": None,
-        "status": "standby",
+        "Mall": None,
+        "Mpd": None,
+        "Mtc": None,
+        "process_time": None,
+        "source_file": source_file,
         "raw_event_line": event_line,
     }
 
     if event_line:
         parts = event_line.split()
         try:
-            event["lat"] = float(parts[6])
-            event["lon"] = float(parts[7])
-            event["depth_km"] = float(parts[8])
-            event["magnitude"] = float(parts[9])
-            event["status"] = "event" if event["magnitude"] and event["magnitude"] >= 1 else "standby"
-        except (ValueError, IndexError):
-            event["status"] = "partial"
+            event["lat"] = _as_float(parts[6])
+            event["lon"] = _as_float(parts[7])
+            event["depth_km"] = _as_float(parts[8])
+            event["Mall"] = _as_float(parts[9])
+            event["Mpd"] = _as_float(parts[12]) if len(parts) > 12 else None
+            event["Mtc"] = _as_float(parts[13]) if len(parts) > 13 else None
+            event["process_time"] = _as_float(parts[14]) if len(parts) > 14 else None
+        except IndexError:
+            pass
 
+    candidate_keys = ["latest_event", "event", "latest_report", "eew_event", "earthquake", "summary"]
+    candidates = [payload.get(k) for k in candidate_keys if isinstance(payload.get(k), dict)]
+    for candidate in candidates:
+        lat = _first_value(candidate, ["lat", "latitude", "epicenter_lat", "epi_lat"])
+        lon = _first_value(candidate, ["lon", "lng", "longitude", "epicenter_lon", "epi_lon"])
+        depth = _first_value(candidate, ["depth", "depth_km", "dep"])
+        mall = _first_value(candidate, ["Mall", "mall", "magnitude", "mag"])
+        mpd = _first_value(candidate, ["Mpd", "mpd"])
+        mtc = _first_value(candidate, ["Mtc", "mtc"])
+        ptime = _first_value(candidate, ["process_time", "processing_time", "latency", "elapsed"])
+        rtime = _first_value(candidate, ["report_time", "reporting_time", "time", "origin_time"])
+        if lat is not None:
+            event["lat"] = _as_float(lat)
+        if lon is not None:
+            event["lon"] = _as_float(lon)
+        if depth is not None:
+            event["depth_km"] = _as_float(depth)
+        if mall is not None:
+            event["Mall"] = _as_float(mall)
+        if mpd is not None:
+            event["Mpd"] = _as_float(mpd)
+        if mtc is not None:
+            event["Mtc"] = _as_float(mtc)
+        if ptime is not None:
+            event["process_time"] = _as_float(ptime)
+        if rtime is not None:
+            event["report_time"] = rtime
     return event
 
 
-def _status_class(text):
-    text = str(text or "").lower()
-    if any(k in text for k in ["up", "ok", "running", "healthy", "正常", "online"]):
-        return "ok"
-    if any(k in text for k in ["warn", "warning", "partial", "degraded", "警告"]):
-        return "warn"
-    if any(k in text for k in ["down", "fail", "error", "exited", "停止", "錯誤"]):
-        return "bad"
-    return "neutral"
-
-
 def _container_rows(payload):
-    containers = payload.get("containers") or payload.get("container") or {}
+    containers = payload.get("containers") or payload.get("container_status") or payload.get("container") or {}
     rows = []
     if isinstance(containers, dict):
         for name, info in containers.items():
             if isinstance(info, dict):
-                status = info.get("status") or info.get("state") or info.get("health") or ""
-                ports = info.get("ports", "")
+                rows.append({
+                    "module": name,
+                    "status": info.get("status") or info.get("state") or info.get("health") or "",
+                    "ports": info.get("ports", ""),
+                    "image": info.get("image", ""),
+                })
             else:
-                status = info
-                ports = ""
-            rows.append({"module": name, "status": status, "ports": ports})
+                rows.append({"module": name, "status": info, "ports": "", "image": ""})
+    elif isinstance(containers, list):
+        for item in containers:
+            if isinstance(item, dict):
+                rows.append({
+                    "module": item.get("name") or item.get("container") or "container",
+                    "status": item.get("status") or item.get("state") or "",
+                    "ports": item.get("ports", ""),
+                    "image": item.get("image", ""),
+                })
     return rows
 
 
 def _disk_rows(payload):
-    disk = payload.get("disk_root") or payload.get("disk") or payload.get("disk_usage")
+    disk = payload.get("disk_root") or payload.get("disk_usage") or payload.get("disk")
     if isinstance(disk, list) and len(disk) >= 6:
-        return [{
-            "device": disk[0],
-            "size": disk[1],
-            "used": disk[2],
-            "available": disk[3],
-            "use_percent": disk[4],
-            "mount": disk[5],
-        }]
+        return [{"device": disk[0], "size": disk[1], "used": disk[2], "available": disk[3], "use_percent": disk[4], "mount": disk[5]}]
     if isinstance(disk, dict):
         return [{
             "device": disk.get("device") or disk.get("filesystem") or "/",
@@ -166,196 +225,154 @@ def _disk_rows(payload):
     return []
 
 
-def _percent_number(value):
-    m = re.search(r"(\d+(?:\.\d+)?)", str(value or ""))
-    return float(m.group(1)) if m else None
+def _status_class(text):
+    text = str(text or "").lower()
+    if any(k in text for k in ["up", "ok", "running", "healthy", "運行", "正常", "available", "exists"]):
+        return "ok"
+    if any(k in text for k in ["warn", "warning", "partial", "警告"]):
+        return "warn"
+    if any(k in text for k in ["down", "fail", "error", "exited", "停止", "missing"]):
+        return "bad"
+    return "neutral"
 
 
-def _collect_module_summary(payload):
+def _pct(value):
+    match = re.search(r"(\d+(?:\.\d+)?)", str(value or ""))
+    return min(100, max(0, float(match.group(1)))) if match else 0
+
+
+def _module_rows(payload):
     rows = []
-    containers = _container_rows(payload)
-    for row in containers:
-        rows.append({
-            "item": row["module"],
-            "status": row["status"],
-            "detail": f"ports: {row.get('ports', '')}" if row.get("ports") else "",
-        })
-
+    for row in _container_rows(payload):
+        rows.append({"item": row["module"], "status": row["status"], "detail": row.get("ports") or row.get("image") or ""})
     rep_files = payload.get("latest_rep_files")
     if isinstance(rep_files, list):
-        rows.append({
-            "item": ".rep 即時檔案",
-            "status": f"{len(rep_files)} files",
-            "detail": rep_files[0] if rep_files else "無最新 .rep 檔",
-        })
-
+        rows.append({"item": ".rep 即時檔案", "status": f"{len(rep_files)} files", "detail": rep_files[0] if rep_files else "無最新 .rep 檔"})
     header = payload.get("latest_rep_header") or {}
     if isinstance(header, dict) and header.get("file"):
-        rows.append({
-            "item": "Earthworm EEW header",
-            "status": "available",
-            "detail": header.get("file"),
-        })
-
+        rows.append({"item": "Earthworm EEW header", "status": "available", "detail": header.get("file")})
     warning = payload.get("earthworm_log_warning")
-    rows.append({
-        "item": "Earthworm log",
-        "status": "warning" if warning else "ok",
-        "detail": warning or "未偵測到 warning",
-    })
-
-    for key in ["waveform_summary", "latest_waveform", "station_heartbeat", "heartbeat_summary"]:
-        if key in payload:
-            rows.append({
-                "item": key,
-                "status": "available",
-                "detail": json.dumps(payload.get(key), ensure_ascii=False)[:120],
-            })
-
-    if not rows:
-        rows.append({"item": "status", "status": "no data", "detail": "未找到狀態欄位"})
+    rows.append({"item": "Earthworm log", "status": "warning" if warning else "ok", "detail": warning or "未偵測到 warning"})
+    files = _repo_files()
+    rows.append({"item": DEFAULT_STATUS_PATH, "status": "exists" if DEFAULT_STATUS_PATH in files else "not confirmed", "detail": "HF Dataset status report"})
+    rows.append({"item": DEFAULT_WAVEFORM_PATH, "status": "exists" if DEFAULT_WAVEFORM_PATH in files else "not confirmed", "detail": "rolling waveform file"})
     return rows
 
 
-def _status_cards_html(payload, source_label):
-    module_rows = _collect_module_summary(payload)
-    disk_rows = _disk_rows(payload)
+def _cards_html(payload, source):
+    event = _event_from_status(payload)
     containers = _container_rows(payload)
-    event = _parse_event(payload)
-
-    main_status = "standby"
-    if event.get("status") == "event":
-        main_status = f"M{event.get('magnitude'):.2f} event"
-    elif containers:
-        main_status = "system online"
-
-    disk = disk_rows[0] if disk_rows else {}
-    disk_pct = _percent_number(disk.get("use_percent"))
-    disk_bar = min(100, max(0, disk_pct or 0))
+    earthworm = next((r for r in containers if "earthworm" in str(r.get("module", "")).lower()), None)
+    earthworm_status = earthworm.get("status") if earthworm else "not found"
+    disk = (_disk_rows(payload) or [{}])[0]
+    disk_percent = _pct(disk.get("use_percent"))
+    job_id = payload.get("job_id") or payload.get("cron_job_id") or "42d2a1b10a19"
+    commit = payload.get("commit") or payload.get("commit_sha") or payload.get("hf_commit") or payload.get("upload_commit") or "6cde92fce17c7e48273bfefb56f44bd4e199c618"
+    collected = payload.get("host_time") or payload.get("collected_utc") or "—"
 
     module_cards = []
-    for row in module_rows[:8]:
+    for row in _module_rows(payload)[:10]:
         cls = _status_class(row.get("status"))
-        module_cards.append(f"""
-        <div class="dash-mini-card {cls}">
-          <div class="mini-title">{_esc(row.get('item'))}</div>
-          <div class="mini-status">{_esc(row.get('status'))}</div>
-          <div class="mini-detail">{_esc(row.get('detail'))}</div>
-        </div>
-        """)
+        module_cards.append(
+            f"<div class='mini {cls}'><b>{_esc(row.get('item'))}</b>"
+            f"<strong>{_esc(row.get('status'))}</strong><small>{_esc(row.get('detail'))}</small></div>"
+        )
 
-    disk_html = """
-      <div class="disk-empty">未提供硬碟資料</div>
-    """
-    if disk_rows:
-        disk_html = f"""
-        <div class="disk-line">
-          <span>{_esc(disk.get('device'))}</span>
-          <strong>{_esc(disk.get('use_percent'))}</strong>
-        </div>
-        <div class="disk-bar"><div class="disk-fill" style="width:{disk_bar:.1f}%"></div></div>
-        <div class="disk-meta">
-          used {_esc(disk.get('used'))} / {_esc(disk.get('size'))}，available {_esc(disk.get('available'))}，mount {_esc(disk.get('mount'))}
-        </div>
-        """
-
-    return f"""
+    css = """
 <style>
-.dashboard-wrap {{ display: grid; gap: 14px; }}
-.hero-card {{
-  border-radius: 20px; padding: 18px; color: #fff;
-  background: linear-gradient(135deg, #0f172a, #1d4ed8);
-  box-shadow: 0 12px 28px rgba(15,23,42,.18);
-}}
-.hero-title {{font-size: 26px; font-weight: 800; margin-bottom: 8px;}}
-.hero-sub {{opacity: .86; font-size: 14px; word-break: break-all;}}
-.hero-pills {{display:flex; flex-wrap:wrap; gap:8px; margin-top:14px;}}
-.pill {{background: rgba(255,255,255,.14); padding:8px 10px; border-radius: 999px; font-weight:700;}}
-.card-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }}
-.dash-card, .dash-mini-card {{
-  border: 1px solid rgba(15,23,42,.10); border-radius: 18px;
-  background: rgba(255,255,255,.96); padding: 14px;
-  box-shadow: 0 6px 20px rgba(15,23,42,.06);
-}}
-.dash-card h3 {{margin: 0 0 10px 0; font-size: 18px;}}
-.dash-mini-card {{min-height: 112px;}}
-.dash-mini-card.ok {{border-left: 6px solid #16a34a;}}
-.dash-mini-card.warn {{border-left: 6px solid #f59e0b;}}
-.dash-mini-card.bad {{border-left: 6px solid #dc2626;}}
-.dash-mini-card.neutral {{border-left: 6px solid #64748b;}}
-.mini-title {{font-weight: 800; color:#0f172a; margin-bottom:8px;}}
-.mini-status {{font-size: 22px; font-weight: 900; color:#111827;}}
-.mini-detail {{margin-top:8px; color:#64748b; font-size:13px; word-break: break-all;}}
-.disk-line {{display:flex; justify-content:space-between; gap:10px; align-items:center;}}
-.disk-bar {{height: 16px; background:#e5e7eb; border-radius:999px; overflow:hidden; margin:10px 0;}}
-.disk-fill {{height:100%; background:linear-gradient(90deg,#22c55e,#f59e0b); border-radius:999px;}}
-.disk-meta, .disk-empty {{color:#64748b; font-size:13px;}}
-@media (max-width: 640px) {{ .hero-title {{font-size: 22px;}} .card-grid {{grid-template-columns: 1fr;}} }}
+.wrap{display:grid;gap:14px}.hero{border-radius:22px;padding:18px;color:#fff;background:linear-gradient(135deg,#0f172a,#1d4ed8 55%,#0891b2);box-shadow:0 12px 28px rgba(15,23,42,.18)}
+.hero h2{margin:0 0 8px 0;font-size:26px}.sub{opacity:.88;font-size:14px;word-break:break-all}.pills{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}.pill{background:rgba(255,255,255,.15);padding:8px 10px;border-radius:999px;font-weight:800}
+.card{border:1px solid rgba(15,23,42,.1);border-radius:18px;background:#fff;padding:14px;box-shadow:0 6px 20px rgba(15,23,42,.06)}.card h3{margin:0 0 10px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}.box{background:#f8fafc;border:1px solid #e5e7eb;border-radius:14px;padding:12px}.label{font-size:12px;color:#64748b;font-weight:700}.value{font-size:20px;font-weight:900;color:#0f172a;margin-top:4px}
+.modules{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.mini{border:1px solid #e5e7eb;border-left:6px solid #64748b;border-radius:16px;padding:12px;min-height:100px}.mini.ok{border-left-color:#16a34a}.mini.warn{border-left-color:#f59e0b}.mini.bad{border-left-color:#dc2626}.mini strong{display:block;font-size:19px;margin-top:8px}.mini small{display:block;color:#64748b;margin-top:8px;word-break:break-all}
+.diskbar{height:16px;background:#e5e7eb;border-radius:999px;overflow:hidden;margin:10px 0}.diskfill{height:100%;background:linear-gradient(90deg,#22c55e,#f59e0b)}.muted{color:#64748b;font-size:13px;word-break:break-all}
+@media(max-width:640px){.hero h2{font-size:22px}.grid,.modules{grid-template-columns:1fr}.value{font-size:18px}}
 </style>
-<div class="dashboard-wrap">
-  <div class="hero-card">
-    <div class="hero-title">EEW / Earthworm 即時狀態</div>
-    <div class="hero-sub">{_esc(source_label)}</div>
-    <div class="hero-pills">
-      <div class="pill">狀態：{_esc(main_status)}</div>
-      <div class="pill">時間：{_esc(payload.get('host_time') or payload.get('collected_utc'))}</div>
-      <div class="pill">Runner：{_esc(payload.get('runner'))}</div>
+"""
+    return css + f"""
+<div class='wrap'>
+  <div class='hero'>
+    <h2>HF Dataset EEW Status Upload</h2>
+    <div class='sub'>{_esc(source)}</div>
+    <div class='pills'>
+      <div class='pill'>容器：{_esc(earthworm_status)}</div>
+      <div class='pill'>Job ID：{_esc(job_id)}</div>
+      <div class='pill'>Dataset：{_esc(DATASET_ID)}</div>
     </div>
   </div>
-  <div class="dash-card">
-    <h3>Earthworm 模組狀態</h3>
-    <div class="card-grid">{''.join(module_cards)}</div>
+  <div class='card'>
+    <h3>最新事件</h3>
+    <div class='grid'>
+      <div class='box'><div class='label'>報告時間</div><div class='value'>{_esc(event.get('report_time') or '—')}</div></div>
+      <div class='box'><div class='label'>Latitude</div><div class='value'>{_format_num(event.get('lat'),4)}</div></div>
+      <div class='box'><div class='label'>Longitude</div><div class='value'>{_format_num(event.get('lon'),4)}</div></div>
+      <div class='box'><div class='label'>Depth</div><div class='value'>{_format_num(event.get('depth_km'),1,' km')}</div></div>
+      <div class='box'><div class='label'>Mall</div><div class='value'>{_format_num(event.get('Mall'),2)}</div></div>
+      <div class='box'><div class='label'>Mpd</div><div class='value'>{_format_num(event.get('Mpd'),2)}</div></div>
+      <div class='box'><div class='label'>Mtc</div><div class='value'>{_format_num(event.get('Mtc'),2)}</div></div>
+      <div class='box'><div class='label'>處理耗時</div><div class='value'>{_format_num(event.get('process_time'),2,' 秒')}</div></div>
+    </div>
   </div>
-  <div class="dash-card">
+  <div class='card'><h3>Earthworm / EEW 模組狀態</h3><div class='modules'>{''.join(module_cards)}</div></div>
+  <div class='card'>
     <h3>硬碟使用量</h3>
-    {disk_html}
+    <b>{_esc(disk.get('device') or '/')}</b> <span class='muted'>{_esc(disk.get('use_percent') or '—')}</span>
+    <div class='diskbar'><div class='diskfill' style='width:{disk_percent:.1f}%'></div></div>
+    <div class='muted'>used {_esc(disk.get('used'))} / {_esc(disk.get('size'))}，available {_esc(disk.get('available'))}，mount {_esc(disk.get('mount'))}</div>
+  </div>
+  <div class='card'>
+    <h3>上傳資訊</h3>
+    <div class='muted'>已上傳：{_esc(DEFAULT_STATUS_PATH)}</div>
+    <div class='muted'>Commit：{_esc(commit)}</div>
+    <div class='muted'>遠端波形：{_esc(DEFAULT_WAVEFORM_PATH)}</div>
+    <div class='muted'>資料時間：{_esc(collected)}</div>
   </div>
 </div>
 """
 
 
-def render_system_status(status_source: str):
+def render_system_status(status_source):
     try:
         payload, label = _load_status_payload(status_source)
     except Exception as exc:
         payload = _load_json(FIXTURES / "normal_event.json")
         label = f"fixtures://normal_event.json（遠端讀取失敗：{exc}）"
-    html = _status_cards_html(payload, label)
-    module_table = pd.DataFrame(_collect_module_summary(payload))
-    disk_table = pd.DataFrame(_disk_rows(payload) or [{"status": "no disk data"}])
-    return html, module_table, disk_table
+    return (
+        _cards_html(payload, label),
+        pd.DataFrame(_module_rows(payload)),
+        pd.DataFrame(_disk_rows(payload) or [{"status": "no disk data"}]),
+        pd.DataFrame([_event_from_status(payload)]),
+    )
 
 
-def render_dashboard(filename: str):
-    path = FIXTURES / filename
-    payload = _load_json(path)
-    event = _parse_event(payload)
-
+def render_event_map(status_source):
+    try:
+        payload, label = _load_status_payload(status_source)
+    except Exception:
+        payload = _load_json(FIXTURES / "normal_event.json")
+        label = "fixtures://normal_event.json"
+    event = _event_from_status(payload)
     lat = event.get("lat") or 23.7
     lon = event.get("lon") or 121.0
-    mag = event.get("magnitude") or 0
+    mag = event.get("Mall") or event.get("Mpd") or event.get("Mtc") or 0
 
     fmap = folium.Map(location=[lat, lon], zoom_start=7, tiles="CartoDB positron")
     radius = max(8000, float(mag) * 12000) if mag else 8000
-    folium.Circle(location=[lat, lon], radius=radius, popup=f"M{mag:.2f}" if mag else "Standby", fill=True).add_to(fmap)
-    folium.Marker([lat, lon], tooltip=f"{event['status']} | M{mag:.2f}" if mag else event["status"]).add_to(fmap)
-
-    status = "🟢 Standby"
-    if event["status"] == "event":
-        status = "🔴 EEW Event"
-    elif event["status"] == "partial":
-        status = "🟠 Partial data"
+    folium.Circle(location=[lat, lon], radius=radius, popup=f"Mall {mag:.2f}" if mag else "EEW event", fill=True).add_to(fmap)
+    folium.Marker([lat, lon], tooltip=f"{event.get('report_time') or label} | Mall {mag:.2f}" if mag else label).add_to(fmap)
 
     summary = pd.DataFrame([
-        {"field": "status", "value": status},
-        {"field": "magnitude", "value": event.get("magnitude")},
+        {"field": "source", "value": label},
+        {"field": "report_time", "value": event.get("report_time")},
         {"field": "latitude", "value": event.get("lat")},
         {"field": "longitude", "value": event.get("lon")},
         {"field": "depth_km", "value": event.get("depth_km")},
-        {"field": "source_file", "value": event.get("file")},
-        {"field": "collected_utc", "value": event.get("collected_utc")},
+        {"field": "Mall", "value": event.get("Mall")},
+        {"field": "Mpd", "value": event.get("Mpd")},
+        {"field": "Mtc", "value": event.get("Mtc")},
+        {"field": "process_time", "value": event.get("process_time")},
     ])
-    return status, summary, fmap._repr_html_(), json.dumps(payload, ensure_ascii=False, indent=2)
+    return "✅ 已載入最新 HF Dataset 事件", summary, fmap._repr_html_(), json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def _coerce_floats(values, limit=6000):
@@ -382,42 +399,35 @@ def _downsample(values, max_points=1200):
 def _series_from_records(records, prefix="records"):
     if not records or not all(isinstance(x, dict) for x in records[:5]):
         return []
-    numeric_by_key = {}
     time_like = {"time", "t", "timestamp", "datetime", "sec", "second", "seconds", "sample", "index"}
+    numeric = {}
     for row in records:
         for key, value in row.items():
-            k = str(key)
-            if k.lower() in time_like:
+            if str(key).lower() in time_like:
                 continue
             try:
-                numeric_by_key.setdefault(k, []).append(float(value))
+                numeric.setdefault(str(key), []).append(float(value))
             except (TypeError, ValueError):
                 pass
-    series = []
-    for key, values in numeric_by_key.items():
-        if len(values) >= 8:
-            series.append({"label": f"{prefix}.{key}", "y": values})
-        if len(series) >= 3:
+    out = []
+    for key, vals in numeric.items():
+        if len(vals) >= 8:
+            out.append({"label": f"{prefix}.{key}", "y": vals})
+        if len(out) >= 3:
             break
-    return series
+    return out
 
 
-def _series_from_csv(path: str):
+def _series_from_csv(path):
     df = pd.read_csv(path)
     numeric = df.select_dtypes(include="number")
     if numeric.empty:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            values = _coerce_floats(re.split(r"[\s,]+", f.read()))
-        return [{"label": "waveform", "y": values}] if values else []
-
+            vals = _coerce_floats(re.split(r"[\s,]+", f.read()))
+        return [{"label": "waveform", "y": vals}] if vals else []
     time_like = {"time", "t", "timestamp", "sec", "second", "seconds", "sample", "index"}
-    y_columns = [c for c in numeric.columns if str(c).strip().lower() not in time_like] or list(numeric.columns)
-    series = []
-    for col in y_columns[:3]:
-        values = _coerce_floats(numeric[col].tolist())
-        if values:
-            series.append({"label": str(col), "y": values})
-    return series
+    cols = [c for c in numeric.columns if str(c).strip().lower() not in time_like] or list(numeric.columns)
+    return [{"label": str(c), "y": _coerce_floats(numeric[c].tolist())} for c in cols[:3]]
 
 
 def _find_numeric_arrays(obj, prefix="", found=None):
@@ -425,23 +435,21 @@ def _find_numeric_arrays(obj, prefix="", found=None):
         found = []
     if len(found) >= 3:
         return found
-
     if isinstance(obj, list):
-        record_series = _series_from_records(obj, prefix or "records")
-        if record_series:
-            found.extend(record_series[: max(0, 3 - len(found))])
+        records = _series_from_records(obj, prefix or "records")
+        if records:
+            found.extend(records[: 3 - len(found)])
             return found
-        values = _coerce_floats(obj)
-        if len(values) >= max(8, len(obj) // 2):
-            found.append({"label": prefix or "waveform", "y": values})
+        vals = _coerce_floats(obj)
+        if len(vals) >= max(8, len(obj) // 2):
+            found.append({"label": prefix or "waveform", "y": vals})
         else:
-            for idx, item in enumerate(obj[:50]):
-                _find_numeric_arrays(item, f"{prefix}[{idx}]", found)
+            for i, item in enumerate(obj[:50]):
+                _find_numeric_arrays(item, f"{prefix}[{i}]", found)
                 if len(found) >= 3:
                     break
-
     elif isinstance(obj, dict):
-        preferred = ["samples", "data", "waveform", "waveforms", "values", "amplitude", "acc", "velocity", "displacement", "z", "n", "e"]
+        preferred = ["samples", "data", "waveform", "waveforms", "values", "amplitude", "acc", "velocity", "displacement", "z", "n", "e", "HLZ", "HLN", "HLE"]
         for key in preferred:
             if key in obj:
                 _find_numeric_arrays(obj[key], f"{prefix}.{key}" if prefix else key, found)
@@ -454,188 +462,171 @@ def _find_numeric_arrays(obj, prefix="", found=None):
     return found
 
 
-def _series_from_json(path: str):
+def _series_from_json(path):
     with open(path, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    return _find_numeric_arrays(payload)
+        return _find_numeric_arrays(json.load(f))
 
 
-def _series_from_txt(path: str):
+def _series_from_txt(path):
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        values = _coerce_floats(re.split(r"[\s,]+", f.read()))
-    return [{"label": "waveform", "y": values}] if values else []
+        vals = _coerce_floats(re.split(r"[\s,]+", f.read()))
+    return [{"label": "waveform", "y": vals}] if vals else []
 
 
 def _synthetic_waveform():
-    values = []
+    vals = []
     for i in range(900):
         pulse = math.exp(-((i - 260) ** 2) / 9500) * math.sin(i / 4.5)
         coda = 0.35 * math.exp(-max(0, i - 360) / 260) * math.sin(i / 11)
-        values.append(pulse + coda)
-    return [{"label": "demo waveform", "y": values}]
+        vals.append(pulse + coda)
+    return [{"label": "demo waveform", "y": vals}]
 
 
-def _load_waveform_series(repo_path: str):
-    if not repo_path or repo_path == "demo://synthetic":
+def _load_waveform_series(path):
+    if not path or path == "demo://synthetic":
         return _synthetic_waveform(), "demo://synthetic"
-    local = hf_hub_download(repo_id=DATASET_ID, filename=repo_path, repo_type="dataset")
-    suffix = repo_path.lower()
-    if suffix.endswith(".csv"):
+    local = hf_hub_download(repo_id=DATASET_ID, filename=path, repo_type="dataset")
+    low = path.lower()
+    if low.endswith(".csv"):
         series = _series_from_csv(local)
-    elif suffix.endswith(".json"):
+    elif low.endswith(".json"):
         series = _series_from_json(local)
-    elif suffix.endswith(".txt"):
+    elif low.endswith(".txt"):
         series = _series_from_txt(local)
     else:
         series = []
-    return series, repo_path
+    return series, path
 
 
-def _path_from_values(values, width, height, pad, min_y, max_y):
+def _svg_path(values, width, height, pad, min_y, max_y):
     if not values:
         return ""
     if min_y == max_y:
         min_y -= 1
         max_y += 1
-    usable_w = width - pad * 1.5
-    usable_h = height - pad * 2
     denom = max(1, len(values) - 1)
-    points = []
-    for idx, value in enumerate(values):
-        x = pad + (idx / denom) * usable_w
-        y = height - pad - ((value - min_y) / (max_y - min_y)) * usable_h
-        points.append(f"{x:.2f},{y:.2f}")
-    return "M " + " L ".join(points)
+    pts = []
+    for i, v in enumerate(values):
+        x = pad + (i / denom) * (width - pad * 1.5)
+        y = height - pad - ((v - min_y) / (max_y - min_y)) * (height - pad * 2)
+        pts.append(f"{x:.2f},{y:.2f}")
+    return "M " + " L ".join(pts)
 
 
-def _waveform_html(series, source_label: str):
-    clean_series = []
+def _waveform_html(series, label):
+    clean = []
     for item in series[:3]:
         y = _downsample(_coerce_floats(item.get("y", [])))
         if y:
-            clean_series.append({"label": str(item.get("label") or "waveform"), "y": y})
-    if not clean_series:
-        return "<div class='empty-wave'>無可繪製的波形資料。請確認 JSON/CSV 內含數值序列。</div>"
+            clean.append({"label": str(item.get("label") or "waveform"), "y": y})
+    if not clean:
+        return "<div style='padding:1rem;border:1px solid #ddd;border-radius:12px;color:#64748b'>無可繪製的波形資料。請確認 JSON/CSV 內含數值序列。</div>"
 
-    width, height, pad = 1100, 320, 44
+    w, h, p = 1100, 320, 44
     colors = ["#0ea5e9", "#22c55e", "#f97316"]
-    all_values = [v for item in clean_series for v in item["y"]]
-    min_y, max_y = min(all_values), max(all_values)
+    all_y = [v for item in clean for v in item["y"]]
+    min_y, max_y = min(all_y), max(all_y)
     if min_y == max_y:
         min_y -= 1
         max_y += 1
 
     grid = []
     for i in range(7):
-        y = pad + i * (height - pad * 2) / 6
-        grid.append(f"<line x1='{pad}' y1='{y:.2f}' x2='{width - pad / 2}' y2='{y:.2f}' class='grid' />")
+        y = p + i * (h - p * 2) / 6
+        grid.append(f"<line x1='{p}' y1='{y:.2f}' x2='{w-p/2}' y2='{y:.2f}' class='grid'/>")
     for i in range(11):
-        x = pad + i * (width - pad * 1.5) / 10
-        grid.append(f"<line x1='{x:.2f}' y1='{pad / 2}' x2='{x:.2f}' y2='{height - pad}' class='grid' />")
+        x = p + i * (w - p * 1.5) / 10
+        grid.append(f"<line x1='{x:.2f}' y1='{p/2}' x2='{x:.2f}' y2='{h-p}' class='grid'/>")
 
-    paths = []
-    legend = []
-    for idx, item in enumerate(clean_series):
+    paths, legends = [], []
+    for idx, item in enumerate(clean):
         color = colors[idx % len(colors)]
-        label = _esc(item["label"])
-        d = _path_from_values(item["y"], width, height, pad, min_y, max_y)
-        paths.append(f"<path d='{d}' class='wave-line' stroke='{color}' />")
-        lx = pad + 8 + idx * 190
-        legend.append(
-            f"<g><line x1='{lx}' y1='28' x2='{lx + 24}' y2='28' stroke='{color}' stroke-width='4' />"
-            f"<text x='{lx + 32}' y='32' class='legend'>{label}</text></g>"
-        )
+        d = _svg_path(item["y"], w, h, p, min_y, max_y)
+        paths.append(f"<path d='{d}' class='line' stroke='{color}'/>")
+        lx = p + 8 + idx * 190
+        legends.append(f"<g><line x1='{lx}' y1='28' x2='{lx+24}' y2='28' stroke='{color}' stroke-width='4'/><text x='{lx+32}' y='32' class='legend'>{_esc(item['label'])}</text></g>")
 
-    return f"""
+    css = """
 <style>
-.wave-card {{ border: 1px solid rgba(15,23,42,.12); border-radius: 18px; padding: 14px; background: #ffffff; box-shadow: 0 8px 22px rgba(15,23,42,.07); }}
-.wave-title {{font-weight: 900; font-size: 18px; margin-bottom: 10px; color:#0f172a; word-break: break-all;}}
-.wave-wrap {{border-radius: 14px; overflow:hidden; background:#f8fafc; border:1px solid #e5e7eb;}}
-.wave-wrap svg {{width: 100%; height: 320px; display: block;}}
-.bg {{fill: #f8fafc;}}
-.grid {{stroke: rgba(100,116,139,.22); stroke-width: 1;}}
-.axis {{stroke: rgba(15,23,42,.45); stroke-width: 1.2;}}
-.axis-label {{fill: #475569; font: 14px system-ui, sans-serif;}}
-.legend {{fill: #334155; font: 13px system-ui, sans-serif;}}
-.wave-line {{ fill: none; stroke-width: 2.3; stroke-linecap: round; stroke-linejoin: round; }}
-.wave-caption {{font-size: 13px; color:#64748b; margin-top:8px;}}
-.empty-wave {{padding:1rem;border:1px solid #ddd;border-radius:12px;color:#64748b;}}
-@media (max-width: 640px) {{ .wave-wrap svg {{height: 260px;}} }}
+.wave-card{border:1px solid rgba(15,23,42,.12);border-radius:18px;padding:14px;background:#fff;box-shadow:0 8px 22px rgba(15,23,42,.07)}
+.wave-title{font-weight:900;font-size:18px;margin-bottom:10px;color:#0f172a;word-break:break-all}.wave-wrap{border-radius:14px;overflow:hidden;background:#f8fafc;border:1px solid #e5e7eb}.wave-wrap svg{width:100%;height:320px;display:block}
+.bg{fill:#f8fafc}.grid{stroke:rgba(100,116,139,.22);stroke-width:1}.axis{stroke:rgba(15,23,42,.45);stroke-width:1.2}.axis-label{fill:#475569;font:14px system-ui,sans-serif}.legend{fill:#334155;font:13px system-ui,sans-serif}.line{fill:none;stroke-width:2.3;stroke-linecap:round;stroke-linejoin:round}.caption{font-size:13px;color:#64748b;margin-top:8px}
+@media(max-width:640px){.wave-wrap svg{height:260px}}
 </style>
-<div class="wave-card">
-  <div class="wave-title">靜態波形：{_esc(source_label)}</div>
-  <div class="wave-wrap">
-    <svg viewBox="0 0 {width} {height}" preserveAspectRatio="none" role="img" aria-label="Static waveform">
-      <rect width="{width}" height="{height}" rx="14" class="bg" />
+"""
+    return css + f"""
+<div class='wave-card'>
+  <div class='wave-title'>靜態波形：{_esc(label)}</div>
+  <div class='wave-wrap'>
+    <svg viewBox='0 0 {w} {h}' preserveAspectRatio='none' role='img' aria-label='Static waveform'>
+      <rect width='{w}' height='{h}' rx='14' class='bg'/>
       {''.join(grid)}
-      <line x1="{pad}" y1="{pad / 2}" x2="{pad}" y2="{height - pad}" class="axis" />
-      <line x1="{pad}" y1="{height - pad}" x2="{width - pad / 2}" y2="{height - pad}" class="axis" />
-      <text x="12" y="24" class="axis-label">Amplitude</text>
-      <text x="{width - 155}" y="{height - 14}" class="axis-label">Samples / time</text>
-      <text x="{pad + 4}" y="{pad - 8}" class="axis-label">{_esc(f'{max_y:.4g}')}</text>
-      <text x="{pad + 4}" y="{height - pad - 5}" class="axis-label">{_esc(f'{min_y:.4g}')}</text>
-      {''.join(legend)}
+      <line x1='{p}' y1='{p/2}' x2='{p}' y2='{h-p}' class='axis'/>
+      <line x1='{p}' y1='{h-p}' x2='{w-p/2}' y2='{h-p}' class='axis'/>
+      <text x='12' y='24' class='axis-label'>Amplitude</text>
+      <text x='{w-155}' y='{h-14}' class='axis-label'>Samples / time</text>
+      <text x='{p+4}' y='{p-8}' class='axis-label'>{_esc(f'{max_y:.4g}')}</text>
+      <text x='{p+4}' y='{h-p-5}' class='axis-label'>{_esc(f'{min_y:.4g}')}</text>
+      {''.join(legends)}
       {''.join(paths)}
     </svg>
   </div>
-  <div class="wave-caption">已改為靜態展示，避免手機瀏覽器或 Gradio HTML 阻擋動畫造成黑畫面。</div>
+  <div class='caption'>預設讀取 waveforms/rolling.json；靜態展示可避免手機黑畫面。</div>
 </div>
 """
 
 
-def render_waveform(repo_path: str):
+def render_waveform(path):
     try:
-        series, source_label = _load_waveform_series(repo_path)
-        html = _waveform_html(series, source_label)
+        series, label = _load_waveform_series(path)
+        html = _waveform_html(series, label)
         rows = []
         for item in series[:3]:
             y = _coerce_floats(item.get("y", []))
             if y:
                 rows.append({"channel": item.get("label", "waveform"), "samples": len(y), "min": min(y), "max": max(y), "mean": sum(y) / len(y)})
-        preview = pd.DataFrame(rows) if rows else pd.DataFrame([{"status": "no numeric waveform found"}])
-        return f"✅ 已載入波形：{source_label}", html, preview
+        return f"✅ 已載入波形：{label}", html, pd.DataFrame(rows or [{"status": "no numeric waveform found"}])
     except Exception as exc:
-        html = _waveform_html(_synthetic_waveform(), "demo://synthetic fallback")
-        preview = pd.DataFrame([{"error": str(exc), "fallback": "demo waveform"}])
-        return "⚠️ 無法讀取遠端波形，已顯示示範波形。", html, preview
+        return "⚠️ 無法讀取遠端波形，已顯示示範波形。", _waveform_html(_synthetic_waveform(), "demo://synthetic fallback"), pd.DataFrame([{"error": str(exc)}])
 
 
-fixture_choices = _fixture_choices()
-status_choices = _status_choices_cached()
-waveform_choices = _waveform_choices_cached()
+status_choices = _status_choices()
+waveform_choices = _waveform_choices()
 
 with gr.Blocks(title="EEW Dashboard") as demo:
-    gr.Markdown("# EEW Dashboard\n臺灣地震預警資料展示、Earthworm 狀態監控與波形檢視")
+    gr.Markdown("# EEW Dashboard\nHF Dataset EEW 狀態、Earthworm 模組監控、最新事件與靜態波形檢視")
 
     with gr.Tab("系統狀態"):
-        gr.Markdown("## Earthworm / EEW 狀態與硬碟使用量")
+        gr.Markdown("## Cronjob Response: HF Dataset EEW Status Upload")
         with gr.Row():
             status_source = gr.Dropdown(choices=status_choices, value=status_choices[0], label="Status file")
             status_refresh = gr.Button("重新讀取狀態清單")
             status_load = gr.Button("載入狀態")
         status_msg = gr.Markdown()
-        status_cards = gr.HTML()
-        module_table = gr.Dataframe(label="模組狀態明細", interactive=False)
+        cards = gr.HTML()
+        module_table = gr.Dataframe(label="模組與遠端檔案狀態", interactive=False)
         disk_table = gr.Dataframe(label="硬碟使用量", interactive=False)
+        event_table = gr.Dataframe(label="最新事件明細", interactive=False)
         status_refresh.click(refresh_status_choices, outputs=[status_source, status_msg])
-        status_load.click(render_system_status, inputs=status_source, outputs=[status_cards, module_table, disk_table])
-        status_source.change(render_system_status, inputs=status_source, outputs=[status_cards, module_table, disk_table])
-        demo.load(render_system_status, inputs=status_source, outputs=[status_cards, module_table, disk_table])
+        status_load.click(render_system_status, inputs=status_source, outputs=[cards, module_table, disk_table, event_table])
+        status_source.change(render_system_status, inputs=status_source, outputs=[cards, module_table, disk_table, event_table])
+        demo.load(render_system_status, inputs=status_source, outputs=[cards, module_table, disk_table, event_table])
 
     with gr.Tab("事件地圖"):
+        gr.Markdown("## 最新事件震央地圖\n預設使用 `status/eew_status_report.json`。")
         with gr.Row():
-            source = gr.Dropdown(choices=fixture_choices, value=fixture_choices[0], label="Replay fixture")
-            refresh = gr.Button("載入資料")
-        status = gr.Markdown()
+            map_source = gr.Dropdown(choices=status_choices, value=status_choices[0], label="Status file")
+            map_refresh = gr.Button("載入地圖")
+        map_status = gr.Markdown()
         summary = gr.Dataframe(label="事件摘要", interactive=False)
         map_html = gr.HTML(label="Map")
         raw = gr.Code(label="Raw JSON", language="json")
-        refresh.click(render_dashboard, inputs=source, outputs=[status, summary, map_html, raw])
-        source.change(render_dashboard, inputs=source, outputs=[status, summary, map_html, raw])
-        demo.load(render_dashboard, inputs=source, outputs=[status, summary, map_html, raw])
+        map_refresh.click(render_event_map, inputs=map_source, outputs=[map_status, summary, map_html, raw])
+        map_source.change(render_event_map, inputs=map_source, outputs=[map_status, summary, map_html, raw])
+        demo.load(render_event_map, inputs=map_source, outputs=[map_status, summary, map_html, raw])
 
     with gr.Tab("靜態波形"):
-        gr.Markdown("## 波形資料\n來源：`oceanicdayi/eew_hermes_dashboard/waveforms`。已改為靜態展示，避免黑畫面。")
+        gr.Markdown("## 波形資料\n預設使用 `waveforms/rolling.json`。已改為靜態展示，避免黑畫面。")
         with gr.Row():
             wave_source = gr.Dropdown(choices=waveform_choices, value=waveform_choices[0], label="Waveform file")
             wave_refresh = gr.Button("重新讀取波形清單")
