@@ -17,8 +17,8 @@ EVENT_DATASET_ID = "oceanicdayi/eew_hermes_dashboard"
 WAVEFORM_DATASET_ID = "oceanicdayi/eew_hermes_dashboard"
 DEFAULT_STATUS = "status/eew_status_report.json"
 DEFAULT_STATUS_ALT = "eew_status_report.json"
-EVENT_STATUS_PATH = "status/eew_status_report.json"
 EVENT_STATUS_PREFIX = "status/"
+EVENT_STATUS_PATH = "status/eew_status_report.json"
 WAVEFORM_IMAGE_PATH = "tsmip/tsmip_hlz_3min_clusters.png"
 
 LAT_KEYS = {
@@ -110,10 +110,10 @@ def refresh_status():
     return gr.update(choices=choices, value=choices[0]), f"已重新讀取 {STATUS_DATASET_ID}：{len(choices)} 筆"
 
 
-def refresh_event_files():
+def refresh_all_event_files():
     event_status_files.cache_clear()
     choices = event_status_choices()
-    return gr.update(choices=choices, value=choices[0]), f"已重新讀取 {EVENT_DATASET_ID}/{EVENT_STATUS_PREFIX}：{len(choices)} 筆"
+    return f"已重新讀取 {EVENT_DATASET_ID}/{EVENT_STATUS_PREFIX}：{len(choices)} 個 JSON 檔，會同時顯示所有可解析事件。"
 
 
 def load_system_status(source):
@@ -133,11 +133,10 @@ def load_system_status(source):
     raise RuntimeError("; ".join(errors[-2:]))
 
 
-def load_event_status(source=None):
-    filename = source or EVENT_STATUS_PATH
-    path = hf_hub_download(repo_id=EVENT_DATASET_ID, filename=filename, repo_type="dataset")
+def load_event_status(source):
+    path = hf_hub_download(repo_id=EVENT_DATASET_ID, filename=source, repo_type="dataset")
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f), filename
+        return json.load(f), source
 
 
 def status_level(text):
@@ -340,139 +339,156 @@ def recursive_event_candidates(obj, path=None, out=None):
     return out
 
 
-def event_from_payload(payload):
-    event = parse_rep_event(payload)
-    if event:
-        return event
+def events_from_payload(payload):
+    parsed = parse_rep_event(payload)
+    if parsed:
+        return [parsed]
 
     candidates = recursive_event_candidates(payload)
-    if candidates:
-        candidates.sort(key=lambda item: item.get("_score", 0), reverse=True)
-        event = candidates[0]
-        event.pop("_score", None)
-        event["stations"] = collect_station_candidates(payload)
-        return event
+    filtered = [item for item in candidates if item.get("_score", 0) >= 0]
+    if not filtered and candidates:
+        filtered = sorted(candidates, key=lambda item: item.get("_score", 0), reverse=True)[:1]
 
-    text = json.dumps(payload, ensure_ascii=False)
-    lat_match = re.search(r"(?:lat|latitude)[^0-9\-]{0,20}(-?\d+(?:\.\d+)?)", text, re.I)
-    lon_match = re.search(r"(?:lon|lng|longitude)[^0-9\-]{0,20}(-?\d+(?:\.\d+)?)", text, re.I)
-    if lat_match and lon_match:
-        return {"lat": to_float(lat_match.group(1)), "lon": to_float(lon_match.group(1)), "stations": []}
-    return None
+    stations = collect_station_candidates(payload)
+    events = []
+    seen = set()
+    for item in sorted(filtered, key=lambda e: e.get("_score", 0), reverse=True):
+        key = (
+            round(item.get("lat") or 0, 4),
+            round(item.get("lon") or 0, 4),
+            str(item.get("time") or ""),
+            str(item.get("magnitude") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        item.pop("_score", None)
+        item["stations"] = stations
+        events.append(item)
+    return events
 
 
-def event_info_html(event, source_label):
-    if not event:
-        return "<div class='event-empty'>目前狀態檔內沒有可解析的地震事件經緯度資料。</div>"
+def load_all_events():
+    files = event_status_choices()
+    events = []
+    unresolved = []
+    for filename in files:
+        try:
+            payload, label = load_event_status(filename)
+            parsed_events = events_from_payload(payload)
+            if parsed_events:
+                for idx, event in enumerate(parsed_events, start=1):
+                    event["source_json"] = label
+                    event["event_index"] = idx
+                    events.append(event)
+            else:
+                unresolved.append({"file": label, "reason": "無可解析座標"})
+        except Exception as exc:
+            unresolved.append({"file": filename, "reason": str(exc)})
+    return events, unresolved, files
+
+
+def event_card_html(event):
     mag = event.get("magnitude")
     dep = event.get("depth_km")
     lat = event.get("lat")
     lon = event.get("lon")
+    title = event.get("location") or f"事件 {event.get('event_index', '')}"
     cards = [
         ("發震時間", event.get("time") or "—"),
         ("規模", f"M {mag:.2f}" if mag is not None else "—"),
         ("深度", f"{dep:.1f} km" if dep is not None else "—"),
         ("震央座標", f"{lat:.4f}, {lon:.4f}" if lat is not None and lon is not None else "—"),
-        ("來源檔案", event.get("source_file") or source_label or "—"),
+        ("來源檔案", event.get("source_json") or event.get("source_file") or "—"),
         ("測站數", str(len(event.get("stations") or []))),
     ]
-    card_html = "".join(f"<div class='eq-card'><div class='eq-label'>{esc(k)}</div><div class='eq-value'>{esc(v)}</div></div>" for k, v in cards)
-    location = event.get("location") or "震央位置依狀態資料解析"
+    fields = "".join(f"<div class='eq-card'><div class='eq-label'>{esc(k)}</div><div class='eq-value'>{esc(v)}</div></div>" for k, v in cards)
+    raw = json.dumps({k: v for k, v in event.items() if k != "stations"}, ensure_ascii=False, indent=2)
+    return f"<div class='event-block'><h3>{esc(title)}</h3><div class='eq-grid'>{fields}</div><details><summary>解析文字資訊</summary><pre class='event-pre'>{esc(raw)}</pre></details></div>"
+
+
+def all_events_info_html(events, unresolved, files):
+    blocks = "".join(event_card_html(event) for event in events)
+    if not blocks:
+        blocks = "<div class='event-empty'>目前 status 資料夾內沒有可解析的地震事件經緯度資料。</div>"
+    unresolved_html = ""
+    if unresolved:
+        rows = "".join(f"<li><b>{esc(item['file'])}</b>：{esc(item['reason'])}</li>" for item in unresolved)
+        unresolved_html = f"<details class='unresolved'><summary>未解析檔案 {len(unresolved)} 筆</summary><ul>{rows}</ul></details>"
     return f"""
 <style>
 .eq-wrap{{display:grid;gap:14px}}
 .eq-hero{{border-radius:22px;padding:20px;color:#fff;background:linear-gradient(135deg,#7f1d1d,#dc2626 55%,#f97316);box-shadow:0 14px 28px rgba(127,29,29,.18)}}
 .eq-hero h2{{margin:0 0 8px!important;color:#fff!important;font-size:28px!important;font-weight:950!important}}
 .eq-hero p{{margin:0;color:rgba(255,255,255,.88)!important;font-weight:700!important}}
+.event-block{{background:#fff;border:1px solid #e5e7eb;border-radius:18px;padding:14px;box-shadow:0 8px 22px rgba(15,23,42,.06)}}
+.event-block h3{{margin:0 0 12px;color:#0f172a;font-size:20px}}
 .eq-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}}
-.eq-card{{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:14px;box-shadow:0 6px 18px rgba(15,23,42,.06)}}
+.eq-card{{background:#f8fafc;border:1px solid #e5e7eb;border-radius:16px;padding:14px}}
 .eq-label{{font-size:12px;color:#64748b;font-weight:800;margin-bottom:6px}}
-.eq-value{{font-size:18px;color:#0f172a;font-weight:900;word-break:break-word}}
+.eq-value{{font-size:17px;color:#0f172a;font-weight:900;word-break:break-word}}
 .event-empty{{padding:16px;border-radius:16px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-weight:800}}
 .event-pre{{background:#0f172a;color:#dbeafe;border-radius:16px;padding:14px;overflow:auto;max-height:260px;font-size:12px;line-height:1.55}}
+.unresolved{{background:#fff7ed;border:1px solid #fed7aa;border-radius:16px;padding:12px;color:#9a3412}}
 </style>
-<div class='eq-wrap'><div class='eq-hero'><h2>地震事件資訊</h2><p>{esc(location)}</p></div><div class='eq-grid'>{card_html}</div></div>
-"""
-
-
-def event_text_html(payload, event, source_label):
-    parsed = json.dumps(event or {}, ensure_ascii=False, indent=2)
-    keys = list(payload.keys()) if isinstance(payload, dict) else []
-    return f"""
-<div style='display:grid;gap:10px;margin-top:12px'>
-  <div style='font-weight:900;color:#0f172a'>事件文字資訊</div>
-  <div style='color:#64748b;font-size:13px'>來源：{esc(EVENT_DATASET_ID)}/{esc(source_label)}；Top-level keys：{esc(', '.join(keys[:12]))}</div>
-  <pre class='event-pre'>{esc(parsed)}</pre>
+<div class='eq-wrap'>
+  <div class='eq-hero'><h2>全部地震事件資訊</h2><p>已掃描 {len(files)} 個 status JSON；成功解析 {len(events)} 筆事件。</p></div>
+  {blocks}
+  {unresolved_html}
 </div>
 """
 
 
-def folium_map_html(event):
-    if not event or event.get("lat") is None or event.get("lon") is None:
+def all_events_folium_map(events):
+    valid = [event for event in events if event.get("lat") is not None and event.get("lon") is not None]
+    if not valid:
         return "<div style='padding:16px;border-radius:16px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-weight:800'>無可繪製的地震事件座標</div>"
 
-    lat = event["lat"]
-    lon = event["lon"]
-    mag = event.get("magnitude")
-    dep = event.get("depth_km")
-    mag_text = f"{mag:.2f}" if isinstance(mag, (int, float)) else "—"
-    dep_text = f"{dep:.1f}" if isinstance(dep, (int, float)) else "—"
-    radius = max(8, min(22, 6 + (mag or 0) * 2.5))
+    center_lat = sum(event["lat"] for event in valid) / len(valid)
+    center_lon = sum(event["lon"] for event in valid) / len(valid)
+    fmap = folium.Map(location=[center_lat, center_lon], zoom_start=7, tiles="OpenStreetMap", control_scale=True)
 
-    fmap = folium.Map(location=[lat, lon], zoom_start=8, tiles="OpenStreetMap", control_scale=True)
-    popup = folium.Popup(
-        f"<b>震央</b><br>時間：{esc(event.get('time') or '—')}<br>規模：M {mag_text}<br>深度：{dep_text} km<br>座標：{lat:.4f}, {lon:.4f}",
-        max_width=320,
-    )
-    folium.CircleMarker(
-        location=[lat, lon],
-        radius=radius,
-        color="#b91c1c",
-        weight=3,
-        fill=True,
-        fill_color="#ef4444",
-        fill_opacity=0.72,
-        tooltip="震央",
-        popup=popup,
-    ).add_to(fmap)
-    folium.Marker(
-        location=[lat, lon],
-        icon=folium.Icon(color="red", icon="exclamation-sign"),
-        tooltip="震央",
-    ).add_to(fmap)
-
-    for station in event.get("stations") or []:
-        sta_lat = station.get("lat")
-        sta_lon = station.get("lon")
-        if sta_lat is None or sta_lon is None:
-            continue
-        name = station.get("station", "station")
+    all_station_keys = set()
+    for idx, event in enumerate(valid, start=1):
+        lat = event["lat"]
+        lon = event["lon"]
+        mag = event.get("magnitude")
+        dep = event.get("depth_km")
+        mag_text = f"{mag:.2f}" if isinstance(mag, (int, float)) else "—"
+        dep_text = f"{dep:.1f}" if isinstance(dep, (int, float)) else "—"
+        radius = max(8, min(24, 6 + (mag or 0) * 2.5))
+        popup = folium.Popup(
+            f"<b>事件 {idx}</b><br>來源：{esc(event.get('source_json') or '—')}<br>時間：{esc(event.get('time') or '—')}<br>規模：M {mag_text}<br>深度：{dep_text} km<br>座標：{lat:.4f}, {lon:.4f}",
+            max_width=360,
+        )
         folium.CircleMarker(
-            location=[sta_lat, sta_lon],
-            radius=4,
-            color="#1d4ed8",
-            weight=2,
-            fill=True,
-            fill_color="#3b82f6",
-            fill_opacity=0.65,
-            tooltip=f"測站：{esc(name)}",
+            location=[lat, lon], radius=radius, color="#b91c1c", weight=3, fill=True,
+            fill_color="#ef4444", fill_opacity=0.72, tooltip=f"地震事件 {idx}", popup=popup,
         ).add_to(fmap)
+        folium.Marker(location=[lat, lon], icon=folium.Icon(color="red", icon="exclamation-sign"), tooltip=f"地震事件 {idx}").add_to(fmap)
+
+        for station in event.get("stations") or []:
+            sta_lat = station.get("lat")
+            sta_lon = station.get("lon")
+            if sta_lat is None or sta_lon is None:
+                continue
+            station_key = (round(sta_lat, 4), round(sta_lon, 4), str(station.get("station", "")))
+            if station_key in all_station_keys:
+                continue
+            all_station_keys.add(station_key)
+            folium.CircleMarker(
+                location=[sta_lat, sta_lon], radius=4, color="#1d4ed8", weight=2, fill=True,
+                fill_color="#3b82f6", fill_opacity=0.65, tooltip=f"測站：{esc(station.get('station', 'station'))}",
+            ).add_to(fmap)
 
     folium.LayerControl().add_to(fmap)
     map_html = fmap.get_root().render()
-    return f"<iframe srcdoc=\"{html.escape(map_html, quote=True)}\" style=\"width:100%;height:560px;border:0;border-radius:18px;box-shadow:0 8px 22px rgba(15,23,42,.08);\"></iframe>"
+    return f"<iframe srcdoc=\"{html.escape(map_html, quote=True)}\" style=\"width:100%;height:600px;border:0;border-radius:18px;box-shadow:0 8px 22px rgba(15,23,42,.08);\"></iframe>"
 
 
-def render_event(source):
-    try:
-        payload, label = load_event_status(source)
-    except Exception as exc:
-        with open(FIXTURES / "normal_event.json", "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        label = f"fallback: {exc}"
-    event = event_from_payload(payload)
-    info = event_info_html(event, f"{EVENT_DATASET_ID}/{label}") + event_text_html(payload, event, label)
-    return info, folium_map_html(event)
+def render_all_events():
+    events, unresolved, files = load_all_events()
+    return all_events_info_html(events, unresolved, files), all_events_folium_map(events)
 
 
 def render_waveform_image():
@@ -498,10 +514,9 @@ def render_waveform_image():
 
 
 status_opts = status_choices()
-event_opts = event_status_choices()
 
 with gr.Blocks(title="EEW Dashboard") as demo:
-    gr.Markdown("# EEW Dashboard\n系統狀態、地震事件與靜態波形儀表板。地震事件資料可選擇 `oceanicdayi/eew_hermes_dashboard/status/` 內的 JSON 檔；波形圖讀取 `tsmip/tsmip_hlz_3min_clusters.png`。")
+    gr.Markdown("# EEW Dashboard\n系統狀態、全部地震事件與靜態波形儀表板。地震事件會同時讀取 `oceanicdayi/eew_hermes_dashboard/status/` 內所有 JSON 檔並顯示文字與 Folium 地圖。")
     with gr.Tab("系統狀態"):
         with gr.Row():
             s = gr.Dropdown(choices=status_opts, value=status_opts[0], label="Status file")
@@ -515,16 +530,14 @@ with gr.Blocks(title="EEW Dashboard") as demo:
         demo.load(render_status, inputs=s, outputs=lights)
     with gr.Tab("地震事件"):
         with gr.Row():
-            es = gr.Dropdown(choices=event_opts, value=event_opts[0], label="Event status file")
             er = gr.Button("重新讀取事件清單")
-            el = gr.Button("載入事件")
-        em = gr.Markdown(f"事件資料來源：`{EVENT_DATASET_ID}/{EVENT_STATUS_PREFIX}`")
+            el = gr.Button("載入全部事件")
+        em = gr.Markdown(f"事件資料來源：`{EVENT_DATASET_ID}/{EVENT_STATUS_PREFIX}`，會同時顯示所有可解析事件。")
         event_info = gr.HTML()
         event_map = gr.HTML()
-        er.click(refresh_event_files, outputs=[es, em])
-        el.click(render_event, inputs=es, outputs=[event_info, event_map])
-        es.change(render_event, inputs=es, outputs=[event_info, event_map])
-        demo.load(render_event, inputs=es, outputs=[event_info, event_map])
+        er.click(refresh_all_event_files, outputs=em)
+        el.click(render_all_events, outputs=[event_info, event_map])
+        demo.load(render_all_events, outputs=[event_info, event_map])
     with gr.Tab("靜態波形"):
         wm = gr.Markdown(f"波形圖來源：`{WAVEFORM_DATASET_ID}/{WAVEFORM_IMAGE_PATH}`")
         wp = gr.Button("載入波形圖")
