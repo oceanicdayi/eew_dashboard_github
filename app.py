@@ -20,7 +20,9 @@ DEFAULT_STATUS_ALT = "eew_status_report.json"
 EVENT_STATUS_PREFIX = "status/"
 EVENT_STATUS_PATH = "status/eew_status_report.json"
 REP_SUMMARY_PATH = "status/rep_summary_detailed.md"
-WAVEFORM_IMAGE_PATH = "tsmip/tsmip_hlz_3min_clusters.png"
+WAVEFORM_PREFIX = "tsmip/waveform/"
+WAVEFORM_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+MAX_WAVEFORM_IMAGES = 30
 
 LAT_KEYS = {
     "lat", "latitude", "event_lat", "event_latitude", "epicenter_lat", "epicenter_latitude",
@@ -84,6 +86,14 @@ def event_status_files():
         return []
 
 
+@lru_cache(maxsize=1)
+def waveform_files():
+    try:
+        return list_repo_files(WAVEFORM_DATASET_ID, repo_type="dataset")
+    except Exception:
+        return []
+
+
 def status_choices():
     files = status_files()
     choices = []
@@ -105,6 +115,14 @@ def event_status_choices():
     return choices or [EVENT_STATUS_PATH]
 
 
+def waveform_image_files():
+    files = waveform_files()
+    return [
+        f for f in sorted(files, reverse=True)
+        if f.startswith(WAVEFORM_PREFIX) and f.lower().endswith(WAVEFORM_IMAGE_EXTS)
+    ]
+
+
 def refresh_status():
     status_files.cache_clear()
     choices = status_choices()
@@ -115,6 +133,12 @@ def refresh_all_event_files():
     event_status_files.cache_clear()
     choices = event_status_choices()
     return f"已重新讀取 {EVENT_DATASET_ID}/{EVENT_STATUS_PREFIX}：{len(choices)} 個 JSON 檔，會以表格同時顯示所有可解析事件。"
+
+
+def refresh_waveform_files():
+    waveform_files.cache_clear()
+    files = waveform_image_files()
+    return f"已重新讀取 {WAVEFORM_DATASET_ID}/{WAVEFORM_PREFIX}：找到 {len(files)} 張波形圖片。"
 
 
 def load_system_status(source):
@@ -497,32 +521,71 @@ def render_all_events():
     return event_table_html(events, unresolved, files), all_events_folium_map(events), load_rep_summary_markdown()
 
 
-def render_waveform_image():
-    image_url = f"https://huggingface.co/datasets/{WAVEFORM_DATASET_ID}/resolve/main/{WAVEFORM_IMAGE_PATH}"
+def file_mime_type(filename):
+    lower = filename.lower()
+    if lower.endswith(".jpg") or lower.endswith(".jpeg"):
+        return "image/jpeg"
+    if lower.endswith(".webp"):
+        return "image/webp"
+    return "image/png"
+
+
+def image_card_html(filename, idx):
+    url = f"https://huggingface.co/datasets/{WAVEFORM_DATASET_ID}/resolve/main/{filename}"
+    title = Path(filename).name
     try:
-        image_path = hf_hub_download(repo_id=WAVEFORM_DATASET_ID, filename=WAVEFORM_IMAGE_PATH, repo_type="dataset")
+        image_path = hf_hub_download(repo_id=WAVEFORM_DATASET_ID, filename=filename, repo_type="dataset")
         with open(image_path, "rb") as f:
             encoded = base64.b64encode(f.read()).decode("ascii")
-        image_html = (
-            "<div style='border:1px solid #e5e7eb;border-radius:18px;padding:10px;background:#fff;box-shadow:0 8px 22px rgba(15,23,42,.06)'>"
-            f"<img src='data:image/png;base64,{encoded}' alt='TSMIP HLZ 3-minute clusters' style='width:100%;height:auto;border-radius:12px;display:block'/>"
-            "</div>"
-        )
-        return f"✅ 已載入波形圖：{WAVEFORM_DATASET_ID}/{WAVEFORM_IMAGE_PATH}", image_html
+        src = f"data:{file_mime_type(filename)};base64,{encoded}"
+        media = f"<img src='{src}' alt='{esc(title)}' loading='lazy'/>"
     except Exception as exc:
-        fallback_html = (
-            "<div style='padding:16px;border-radius:16px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-weight:800'>"
-            f"無法透過 huggingface_hub 讀取圖檔：{esc(exc)}<br>"
-            f"<a href='{esc(image_url)}' target='_blank'>直接開啟波形圖</a>"
-            "</div>"
-        )
-        return f"⚠️ 無法讀取指定波形圖：{exc}", fallback_html
+        media = f"<div class='wave-error'>讀取失敗：{esc(exc)}<br><a href='{esc(url)}' target='_blank'>直接開啟</a></div>"
+    return f"""
+<div class='wave-card'>
+  <div class='wave-img'>{media}</div>
+  <div class='wave-meta'><b>{idx:02d}. {esc(title)}</b><small>{esc(filename)}</small><a href='{esc(url)}' target='_blank'>開啟原圖</a></div>
+</div>
+"""
+
+
+def render_waveform_gallery():
+    files = waveform_image_files()
+    shown = files[:MAX_WAVEFORM_IMAGES]
+    cards = "".join(image_card_html(filename, idx) for idx, filename in enumerate(shown, start=1))
+    if not cards:
+        cards = "<div class='wave-empty'>目前資料夾內沒有可展示的波形圖片。</div>"
+    more_note = "" if len(files) <= len(shown) else f"<div class='wave-note'>另有 {len(files) - len(shown)} 張未顯示，可至資料集資料夾查看。</div>"
+    html_block = f"""
+<style>
+.wave-wrap{{display:grid;gap:16px}}
+.wave-hero{{border-radius:22px;padding:20px;color:#fff;background:linear-gradient(135deg,#0f172a,#334155 55%,#0284c7);box-shadow:0 14px 28px rgba(15,23,42,.18)}}
+.wave-hero h2{{margin:0 0 8px!important;color:#fff!important;font-size:28px!important;font-weight:950!important}}
+.wave-hero p{{margin:0;color:rgba(255,255,255,.88)!important;font-weight:700!important;word-break:break-word}}
+.wave-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;align-items:start}}
+.wave-card{{background:#fff;border:1px solid #e5e7eb;border-radius:18px;overflow:hidden;box-shadow:0 8px 22px rgba(15,23,42,.06)}}
+.wave-img{{background:#f8fafc;border-bottom:1px solid #e5e7eb}}
+.wave-img img{{width:100%;height:auto;display:block}}
+.wave-meta{{padding:12px;display:grid;gap:5px}}
+.wave-meta b{{color:#0f172a;font-size:15px;word-break:break-word}}
+.wave-meta small{{color:#64748b;word-break:break-all;font-size:12px}}
+.wave-meta a{{font-size:13px;font-weight:800;text-decoration:none;color:#2563eb}}
+.wave-empty,.wave-error,.wave-note{{padding:14px;border-radius:16px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-weight:800}}
+@media(max-width:640px){{.wave-grid{{grid-template-columns:1fr}}.wave-hero h2{{font-size:24px!important}}}}
+</style>
+<div class='wave-wrap'>
+  <div class='wave-hero'><h2>TSMIP 波形展示</h2><p>來源：{esc(WAVEFORM_DATASET_ID)}/{esc(WAVEFORM_PREFIX)}；共找到 {len(files)} 張，顯示 {len(shown)} 張。</p></div>
+  <div class='wave-grid'>{cards}</div>
+  {more_note}
+</div>
+"""
+    return f"✅ 已載入波形展示：{WAVEFORM_DATASET_ID}/{WAVEFORM_PREFIX}，共 {len(files)} 張圖片。", html_block
 
 
 status_opts = status_choices()
 
 with gr.Blocks(title="EEW Dashboard") as demo:
-    gr.Markdown("# EEW Dashboard\n系統狀態、全部地震事件與靜態波形儀表板。地震事件以表格呈現，解析文字資訊固定讀取 `status/rep_summary_detailed.md`。")
+    gr.Markdown("# EEW Dashboard\n系統狀態、全部地震事件與 TSMIP 波形展示。波形展示會自動讀取 `tsmip/waveform/` 內的圖片並以卡片式排版呈現。")
     with gr.Tab("系統狀態"):
         with gr.Row():
             s = gr.Dropdown(choices=status_opts, value=status_opts[0], label="Status file")
@@ -546,12 +609,15 @@ with gr.Blocks(title="EEW Dashboard") as demo:
         el.click(render_all_events, outputs=[event_table, event_map, event_summary])
         demo.load(render_all_events, outputs=[event_table, event_map, event_summary])
     with gr.Tab("靜態波形"):
-        wm = gr.Markdown(f"波形圖來源：`{WAVEFORM_DATASET_ID}/{WAVEFORM_IMAGE_PATH}`")
-        wp = gr.Button("載入波形圖")
+        wm = gr.Markdown(f"波形資料夾來源：`{WAVEFORM_DATASET_ID}/{WAVEFORM_PREFIX}`")
+        with gr.Row():
+            wr = gr.Button("重新讀取波形資料夾")
+            wp = gr.Button("載入波形展示")
         wave_msg = gr.Markdown()
-        wave_img = gr.HTML()
-        wp.click(render_waveform_image, outputs=[wave_msg, wave_img])
-        demo.load(render_waveform_image, outputs=[wave_msg, wave_img])
+        wave_gallery = gr.HTML()
+        wr.click(refresh_waveform_files, outputs=wave_msg)
+        wp.click(render_waveform_gallery, outputs=[wave_msg, wave_gallery])
+        demo.load(render_waveform_gallery, outputs=[wave_msg, wave_gallery])
 
 if __name__ == "__main__":
     demo.launch()
