@@ -1,5 +1,7 @@
+import base64
 import html
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -18,6 +20,21 @@ DEFAULT_STATUS_ALT = "eew_status_report.json"
 EVENT_STATUS_PATH = "status/eew_status_report.json"
 WAVEFORM_IMAGE_PATH = "tsmip/tsmip_hlz_3min_clusters.png"
 
+LAT_KEYS = {
+    "lat", "latitude", "event_lat", "event_latitude", "epicenter_lat", "epicenter_latitude",
+    "origin_lat", "origin_latitude", "hypo_lat", "hypocenter_lat", "eq_lat", "eqlat", "evlat",
+}
+LON_KEYS = {
+    "lon", "lng", "longitude", "event_lon", "event_lng", "event_longitude",
+    "epicenter_lon", "epicenter_lng", "epicenter_longitude", "origin_lon", "origin_lng",
+    "hypo_lon", "hypocenter_lon", "eq_lon", "eqlon", "evlon",
+}
+MAG_KEYS = {"magnitude", "mag", "ml", "mw", "m", "mall", "mpd", "mtc", "M", "Mpd", "Mtc", "Mall"}
+DEPTH_KEYS = {"depth", "depth_km", "dep", "hypo_depth", "hypocenter_depth"}
+TIME_KEYS = {"time", "origin_time", "event_time", "timestamp", "datetime", "report_time", "trigger_time"}
+LOCATION_KEYS = {"location", "area", "epicenter", "place", "region", "description"}
+SOURCE_KEYS = {"source_file", "file", "filename", "source"}
+
 
 def esc(value):
     return html.escape("" if value is None else str(value))
@@ -27,9 +44,26 @@ def to_float(value):
     try:
         if value is None:
             return None
-        return float(value)
+        text = str(value).strip().replace(",", "")
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if not match:
+            return None
+        return float(match.group(0))
     except Exception:
         return None
+
+
+def first_value(obj, keys):
+    if not isinstance(obj, dict):
+        return None
+    lower_map = {str(k).lower(): k for k in obj.keys()}
+    for key in keys:
+        actual = lower_map.get(str(key).lower())
+        if actual is not None:
+            value = obj.get(actual)
+            if value not in (None, ""):
+                return value
+    return None
 
 
 @lru_cache(maxsize=1)
@@ -213,24 +247,89 @@ def parse_rep_event(payload):
     return event if event.get("lat") is not None and event.get("lon") is not None else None
 
 
+def score_event_candidate(obj, path, lat, lon):
+    path_text = ".".join(path).lower()
+    score = 0
+    keys = {str(k).lower() for k in obj.keys()}
+    if keys.intersection({k.lower() for k in MAG_KEYS}):
+        score += 6
+    if keys.intersection({k.lower() for k in DEPTH_KEYS}):
+        score += 5
+    if keys.intersection({k.lower() for k in TIME_KEYS}):
+        score += 3
+    if any(word in path_text for word in ["event", "eew", "earthquake", "latest", "report", "hypo"]):
+        score += 3
+    if any(word in path_text for word in ["station", "stations", "sta"]):
+        score -= 5
+    if 18 <= lat <= 28 and 118 <= lon <= 124:
+        score += 2
+    return score
+
+
+def collect_station_candidates(obj, path=None, out=None):
+    path = path or []
+    out = out or []
+    if isinstance(obj, dict):
+        lat = to_float(first_value(obj, LAT_KEYS))
+        lon = to_float(first_value(obj, LON_KEYS))
+        path_text = ".".join(path).lower()
+        if lat is not None and lon is not None and any(word in path_text for word in ["station", "stations", "sta"]):
+            name = first_value(obj, {"station", "sta", "name", "code", "id"}) or f"STA{len(out) + 1}"
+            out.append({"station": str(name), "lat": lat, "lon": lon})
+        for key, value in obj.items():
+            collect_station_candidates(value, path + [str(key)], out)
+    elif isinstance(obj, list):
+        for idx, value in enumerate(obj[:300]):
+            collect_station_candidates(value, path + [str(idx)], out)
+    return out
+
+
+def recursive_event_candidates(obj, path=None, out=None):
+    path = path or []
+    out = out or []
+    if isinstance(obj, dict):
+        lat = to_float(first_value(obj, LAT_KEYS))
+        lon = to_float(first_value(obj, LON_KEYS))
+        if lat is not None and lon is not None:
+            score = score_event_candidate(obj, path, lat, lon)
+            out.append({
+                "time": first_value(obj, TIME_KEYS),
+                "lat": lat,
+                "lon": lon,
+                "depth_km": to_float(first_value(obj, DEPTH_KEYS)),
+                "magnitude": to_float(first_value(obj, MAG_KEYS)),
+                "location": first_value(obj, LOCATION_KEYS),
+                "source_file": first_value(obj, SOURCE_KEYS),
+                "stations": [],
+                "_score": score,
+            })
+        for key, value in obj.items():
+            recursive_event_candidates(value, path + [str(key)], out)
+    elif isinstance(obj, list):
+        for idx, value in enumerate(obj[:300]):
+            recursive_event_candidates(value, path + [str(idx)], out)
+    return out
+
+
 def event_from_payload(payload):
-    for key in ["latest_event", "event", "latest_report", "eew_event", "earthquake", "summary", "latest_event_summary", "eew_summary"]:
-        obj = payload.get(key)
-        if isinstance(obj, dict):
-            lat = to_float(obj.get("lat") or obj.get("latitude"))
-            lon = to_float(obj.get("lon") or obj.get("lng") or obj.get("longitude"))
-            if lat is not None and lon is not None:
-                return {
-                    "time": obj.get("time") or obj.get("origin_time") or obj.get("datetime") or obj.get("timestamp"),
-                    "lat": lat,
-                    "lon": lon,
-                    "depth_km": to_float(obj.get("depth") or obj.get("depth_km") or obj.get("dep")),
-                    "magnitude": to_float(obj.get("magnitude") or obj.get("mag") or obj.get("Mall") or obj.get("ml")),
-                    "location": obj.get("location") or obj.get("area") or obj.get("epicenter"),
-                    "source_file": obj.get("file") or obj.get("source"),
-                    "stations": obj.get("stations") if isinstance(obj.get("stations"), list) else [],
-                }
-    return parse_rep_event(payload)
+    event = parse_rep_event(payload)
+    if event:
+        return event
+
+    candidates = recursive_event_candidates(payload)
+    if candidates:
+        candidates.sort(key=lambda item: item.get("_score", 0), reverse=True)
+        event = candidates[0]
+        event.pop("_score", None)
+        event["stations"] = collect_station_candidates(payload)
+        return event
+
+    text = json.dumps(payload, ensure_ascii=False)
+    lat_match = re.search(r"(?:lat|latitude)[^0-9\-]{0,20}(-?\d+(?:\.\d+)?)", text, re.I)
+    lon_match = re.search(r"(?:lon|lng|longitude)[^0-9\-]{0,20}(-?\d+(?:\.\d+)?)", text, re.I)
+    if lat_match and lon_match:
+        return {"lat": to_float(lat_match.group(1)), "lon": to_float(lon_match.group(1)), "stations": []}
+    return None
 
 
 def event_info_html(event, source_label):
@@ -334,11 +433,25 @@ def render_event():
 
 
 def render_waveform_image():
+    image_url = f"https://huggingface.co/datasets/{WAVEFORM_DATASET_ID}/resolve/main/{WAVEFORM_IMAGE_PATH}"
     try:
         image_path = hf_hub_download(repo_id=WAVEFORM_DATASET_ID, filename=WAVEFORM_IMAGE_PATH, repo_type="dataset")
-        return f"✅ 已載入波形圖：{WAVEFORM_DATASET_ID}/{WAVEFORM_IMAGE_PATH}", image_path
+        with open(image_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("ascii")
+        image_html = (
+            "<div style='border:1px solid #e5e7eb;border-radius:18px;padding:10px;background:#fff;box-shadow:0 8px 22px rgba(15,23,42,.06)'>"
+            f"<img src='data:image/png;base64,{encoded}' alt='TSMIP HLZ 3-minute clusters' style='width:100%;height:auto;border-radius:12px;display:block'/>"
+            "</div>"
+        )
+        return f"✅ 已載入波形圖：{WAVEFORM_DATASET_ID}/{WAVEFORM_IMAGE_PATH}", image_html
     except Exception as exc:
-        return f"⚠️ 無法讀取指定波形圖：{exc}", None
+        fallback_html = (
+            "<div style='padding:16px;border-radius:16px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-weight:800'>"
+            f"無法透過 huggingface_hub 讀取圖檔：{esc(exc)}<br>"
+            f"<a href='{esc(image_url)}' target='_blank'>直接開啟波形圖</a>"
+            "</div>"
+        )
+        return f"⚠️ 無法讀取指定波形圖：{exc}", fallback_html
 
 
 status_opts = status_choices()
@@ -367,7 +480,7 @@ with gr.Blocks(title="EEW Dashboard") as demo:
         wm = gr.Markdown(f"波形圖來源：`{WAVEFORM_DATASET_ID}/{WAVEFORM_IMAGE_PATH}`")
         wp = gr.Button("載入波形圖")
         wave_msg = gr.Markdown()
-        wave_img = gr.Image(label="TSMIP HLZ 3-minute clusters", type="filepath")
+        wave_img = gr.HTML(label="TSMIP HLZ 3-minute clusters")
         wp.click(render_waveform_image, outputs=[wave_msg, wave_img])
         demo.load(render_waveform_image, outputs=[wave_msg, wave_img])
 
