@@ -19,6 +19,7 @@ DEFAULT_STATUS = "status/eew_status_report.json"
 DEFAULT_STATUS_ALT = "eew_status_report.json"
 EVENT_STATUS_PREFIX = "status/"
 EVENT_STATUS_PATH = "status/eew_status_report.json"
+REP_SUMMARY_PATH = "status/rep_summary_detailed.md"
 WAVEFORM_IMAGE_PATH = "tsmip/tsmip_hlz_3min_clusters.png"
 
 LAT_KEYS = {
@@ -113,7 +114,7 @@ def refresh_status():
 def refresh_all_event_files():
     event_status_files.cache_clear()
     choices = event_status_choices()
-    return f"已重新讀取 {EVENT_DATASET_ID}/{EVENT_STATUS_PREFIX}：{len(choices)} 個 JSON 檔，會同時顯示所有可解析事件。"
+    return f"已重新讀取 {EVENT_DATASET_ID}/{EVENT_STATUS_PREFIX}：{len(choices)} 個 JSON 檔，會以表格同時顯示所有可解析事件。"
 
 
 def load_system_status(source):
@@ -137,6 +138,16 @@ def load_event_status(source):
     path = hf_hub_download(repo_id=EVENT_DATASET_ID, filename=source, repo_type="dataset")
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f), source
+
+
+def load_rep_summary_markdown():
+    try:
+        path = hf_hub_download(repo_id=EVENT_DATASET_ID, filename=REP_SUMMARY_PATH, repo_type="dataset")
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        return f"### 解析文字資訊\n\n來源：`{EVENT_DATASET_ID}/{REP_SUMMARY_PATH}`\n\n" + text
+    except Exception as exc:
+        return f"### 解析文字資訊\n\n⚠️ 無法讀取 `{EVENT_DATASET_ID}/{REP_SUMMARY_PATH}`：{exc}"
 
 
 def status_level(text):
@@ -388,52 +399,47 @@ def load_all_events():
     return events, unresolved, files
 
 
-def event_card_html(event):
-    mag = event.get("magnitude")
-    dep = event.get("depth_km")
-    lat = event.get("lat")
-    lon = event.get("lon")
-    title = event.get("location") or f"事件 {event.get('event_index', '')}"
-    cards = [
-        ("發震時間", event.get("time") or "—"),
-        ("規模", f"M {mag:.2f}" if mag is not None else "—"),
-        ("深度", f"{dep:.1f} km" if dep is not None else "—"),
-        ("震央座標", f"{lat:.4f}, {lon:.4f}" if lat is not None and lon is not None else "—"),
-        ("來源檔案", event.get("source_json") or event.get("source_file") or "—"),
-        ("測站數", str(len(event.get("stations") or []))),
-    ]
-    fields = "".join(f"<div class='eq-card'><div class='eq-label'>{esc(k)}</div><div class='eq-value'>{esc(v)}</div></div>" for k, v in cards)
-    raw = json.dumps({k: v for k, v in event.items() if k != "stations"}, ensure_ascii=False, indent=2)
-    return f"<div class='event-block'><h3>{esc(title)}</h3><div class='eq-grid'>{fields}</div><details><summary>解析文字資訊</summary><pre class='event-pre'>{esc(raw)}</pre></details></div>"
-
-
-def all_events_info_html(events, unresolved, files):
-    blocks = "".join(event_card_html(event) for event in events)
-    if not blocks:
-        blocks = "<div class='event-empty'>目前 status 資料夾內沒有可解析的地震事件經緯度資料。</div>"
+def event_table_html(events, unresolved, files):
+    rows = []
+    for idx, event in enumerate(events, start=1):
+        mag = event.get("magnitude")
+        dep = event.get("depth_km")
+        lat = event.get("lat")
+        lon = event.get("lon")
+        rows.append(
+            "<tr>"
+            f"<td>{idx}</td>"
+            f"<td>{esc(event.get('source_json') or event.get('source_file') or '—')}</td>"
+            f"<td>{esc(event.get('time') or '—')}</td>"
+            f"<td>{esc(f'M {mag:.2f}' if mag is not None else '—')}</td>"
+            f"<td>{esc(f'{dep:.1f}' if dep is not None else '—')}</td>"
+            f"<td>{esc(f'{lat:.4f}' if lat is not None else '—')}</td>"
+            f"<td>{esc(f'{lon:.4f}' if lon is not None else '—')}</td>"
+            f"<td>{esc(event.get('location') or '—')}</td>"
+            f"<td>{len(event.get('stations') or [])}</td>"
+            "</tr>"
+        )
+    body = "".join(rows) or "<tr><td colspan='9'>目前 status 資料夾內沒有可解析的地震事件經緯度資料。</td></tr>"
     unresolved_html = ""
     if unresolved:
-        rows = "".join(f"<li><b>{esc(item['file'])}</b>：{esc(item['reason'])}</li>" for item in unresolved)
-        unresolved_html = f"<details class='unresolved'><summary>未解析檔案 {len(unresolved)} 筆</summary><ul>{rows}</ul></details>"
+        items = "".join(f"<li><b>{esc(item['file'])}</b>：{esc(item['reason'])}</li>" for item in unresolved)
+        unresolved_html = f"<details class='unresolved'><summary>未解析檔案 {len(unresolved)} 筆</summary><ul>{items}</ul></details>"
     return f"""
 <style>
 .eq-wrap{{display:grid;gap:14px}}
 .eq-hero{{border-radius:22px;padding:20px;color:#fff;background:linear-gradient(135deg,#7f1d1d,#dc2626 55%,#f97316);box-shadow:0 14px 28px rgba(127,29,29,.18)}}
 .eq-hero h2{{margin:0 0 8px!important;color:#fff!important;font-size:28px!important;font-weight:950!important}}
 .eq-hero p{{margin:0;color:rgba(255,255,255,.88)!important;font-weight:700!important}}
-.event-block{{background:#fff;border:1px solid #e5e7eb;border-radius:18px;padding:14px;box-shadow:0 8px 22px rgba(15,23,42,.06)}}
-.event-block h3{{margin:0 0 12px;color:#0f172a;font-size:20px}}
-.eq-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}}
-.eq-card{{background:#f8fafc;border:1px solid #e5e7eb;border-radius:16px;padding:14px}}
-.eq-label{{font-size:12px;color:#64748b;font-weight:800;margin-bottom:6px}}
-.eq-value{{font-size:17px;color:#0f172a;font-weight:900;word-break:break-word}}
-.event-empty{{padding:16px;border-radius:16px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-weight:800}}
-.event-pre{{background:#0f172a;color:#dbeafe;border-radius:16px;padding:14px;overflow:auto;max-height:260px;font-size:12px;line-height:1.55}}
+.table-wrap{{overflow:auto;border:1px solid #e5e7eb;border-radius:18px;background:#fff;box-shadow:0 8px 22px rgba(15,23,42,.06)}}
+.eq-table{{width:100%;border-collapse:collapse;min-width:920px}}
+.eq-table th{{position:sticky;top:0;background:#f8fafc;color:#0f172a;text-align:left;font-size:13px;padding:12px;border-bottom:1px solid #e5e7eb;white-space:nowrap}}
+.eq-table td{{padding:12px;border-bottom:1px solid #eef2f7;color:#1f2937;font-size:14px;vertical-align:top;white-space:nowrap}}
+.eq-table td:nth-child(2),.eq-table td:nth-child(8){{white-space:normal;min-width:180px}}
 .unresolved{{background:#fff7ed;border:1px solid #fed7aa;border-radius:16px;padding:12px;color:#9a3412}}
 </style>
 <div class='eq-wrap'>
-  <div class='eq-hero'><h2>全部地震事件資訊</h2><p>已掃描 {len(files)} 個 status JSON；成功解析 {len(events)} 筆事件。</p></div>
-  {blocks}
+  <div class='eq-hero'><h2>全部地震事件表格</h2><p>已掃描 {len(files)} 個 status JSON；成功解析 {len(events)} 筆事件。</p></div>
+  <div class='table-wrap'><table class='eq-table'><thead><tr><th>#</th><th>來源檔案</th><th>發震時間</th><th>規模</th><th>深度 km</th><th>緯度</th><th>經度</th><th>位置 / 描述</th><th>測站數</th></tr></thead><tbody>{body}</tbody></table></div>
   {unresolved_html}
 </div>
 """
@@ -488,7 +494,7 @@ def all_events_folium_map(events):
 
 def render_all_events():
     events, unresolved, files = load_all_events()
-    return all_events_info_html(events, unresolved, files), all_events_folium_map(events)
+    return event_table_html(events, unresolved, files), all_events_folium_map(events), load_rep_summary_markdown()
 
 
 def render_waveform_image():
@@ -516,7 +522,7 @@ def render_waveform_image():
 status_opts = status_choices()
 
 with gr.Blocks(title="EEW Dashboard") as demo:
-    gr.Markdown("# EEW Dashboard\n系統狀態、全部地震事件與靜態波形儀表板。地震事件會同時讀取 `oceanicdayi/eew_hermes_dashboard/status/` 內所有 JSON 檔並顯示文字與 Folium 地圖。")
+    gr.Markdown("# EEW Dashboard\n系統狀態、全部地震事件與靜態波形儀表板。地震事件以表格呈現，解析文字資訊固定讀取 `status/rep_summary_detailed.md`。")
     with gr.Tab("系統狀態"):
         with gr.Row():
             s = gr.Dropdown(choices=status_opts, value=status_opts[0], label="Status file")
@@ -532,12 +538,13 @@ with gr.Blocks(title="EEW Dashboard") as demo:
         with gr.Row():
             er = gr.Button("重新讀取事件清單")
             el = gr.Button("載入全部事件")
-        em = gr.Markdown(f"事件資料來源：`{EVENT_DATASET_ID}/{EVENT_STATUS_PREFIX}`，會同時顯示所有可解析事件。")
-        event_info = gr.HTML()
+        em = gr.Markdown(f"事件資料來源：`{EVENT_DATASET_ID}/{EVENT_STATUS_PREFIX}`；解析文字資訊：`{EVENT_DATASET_ID}/{REP_SUMMARY_PATH}`")
+        event_table = gr.HTML()
         event_map = gr.HTML()
+        event_summary = gr.Markdown()
         er.click(refresh_all_event_files, outputs=em)
-        el.click(render_all_events, outputs=[event_info, event_map])
-        demo.load(render_all_events, outputs=[event_info, event_map])
+        el.click(render_all_events, outputs=[event_table, event_map, event_summary])
+        demo.load(render_all_events, outputs=[event_table, event_map, event_summary])
     with gr.Tab("靜態波形"):
         wm = gr.Markdown(f"波形圖來源：`{WAVEFORM_DATASET_ID}/{WAVEFORM_IMAGE_PATH}`")
         wp = gr.Button("載入波形圖")
