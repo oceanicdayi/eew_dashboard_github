@@ -18,6 +18,7 @@ WAVEFORM_DATASET_ID = "oceanicdayi/eew_hermes_dashboard"
 DEFAULT_STATUS = "status/eew_status_report.json"
 DEFAULT_STATUS_ALT = "eew_status_report.json"
 EVENT_STATUS_PATH = "status/eew_status_report.json"
+EVENT_STATUS_PREFIX = "status/"
 WAVEFORM_IMAGE_PATH = "tsmip/tsmip_hlz_3min_clusters.png"
 
 LAT_KEYS = {
@@ -74,6 +75,14 @@ def status_files():
         return []
 
 
+@lru_cache(maxsize=1)
+def event_status_files():
+    try:
+        return list_repo_files(EVENT_DATASET_ID, repo_type="dataset")
+    except Exception:
+        return []
+
+
 def status_choices():
     files = status_files()
     choices = []
@@ -86,10 +95,25 @@ def status_choices():
     return choices or ["fixtures://normal_event.json"]
 
 
+def event_status_choices():
+    files = event_status_files()
+    choices = [f for f in sorted(files, reverse=True) if f.startswith(EVENT_STATUS_PREFIX) and f.lower().endswith(".json")]
+    if EVENT_STATUS_PATH in choices:
+        choices.remove(EVENT_STATUS_PATH)
+        choices.insert(0, EVENT_STATUS_PATH)
+    return choices or [EVENT_STATUS_PATH]
+
+
 def refresh_status():
     status_files.cache_clear()
     choices = status_choices()
     return gr.update(choices=choices, value=choices[0]), f"已重新讀取 {STATUS_DATASET_ID}：{len(choices)} 筆"
+
+
+def refresh_event_files():
+    event_status_files.cache_clear()
+    choices = event_status_choices()
+    return gr.update(choices=choices, value=choices[0]), f"已重新讀取 {EVENT_DATASET_ID}/{EVENT_STATUS_PREFIX}：{len(choices)} 筆"
 
 
 def load_system_status(source):
@@ -109,10 +133,11 @@ def load_system_status(source):
     raise RuntimeError("; ".join(errors[-2:]))
 
 
-def load_event_status():
-    path = hf_hub_download(repo_id=EVENT_DATASET_ID, filename=EVENT_STATUS_PATH, repo_type="dataset")
+def load_event_status(source=None):
+    filename = source or EVENT_STATUS_PATH
+    path = hf_hub_download(repo_id=EVENT_DATASET_ID, filename=filename, repo_type="dataset")
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f), EVENT_STATUS_PATH
+        return json.load(f), filename
 
 
 def status_level(text):
@@ -267,8 +292,10 @@ def score_event_candidate(obj, path, lat, lon):
 
 
 def collect_station_candidates(obj, path=None, out=None):
-    path = path or []
-    out = out or []
+    if path is None:
+        path = []
+    if out is None:
+        out = []
     if isinstance(obj, dict):
         lat = to_float(first_value(obj, LAT_KEYS))
         lon = to_float(first_value(obj, LON_KEYS))
@@ -285,8 +312,10 @@ def collect_station_candidates(obj, path=None, out=None):
 
 
 def recursive_event_candidates(obj, path=None, out=None):
-    path = path or []
-    out = out or []
+    if path is None:
+        path = []
+    if out is None:
+        out = []
     if isinstance(obj, dict):
         lat = to_float(first_value(obj, LAT_KEYS))
         lon = to_float(first_value(obj, LON_KEYS))
@@ -360,8 +389,21 @@ def event_info_html(event, source_label):
 .eq-label{{font-size:12px;color:#64748b;font-weight:800;margin-bottom:6px}}
 .eq-value{{font-size:18px;color:#0f172a;font-weight:900;word-break:break-word}}
 .event-empty{{padding:16px;border-radius:16px;background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;font-weight:800}}
+.event-pre{{background:#0f172a;color:#dbeafe;border-radius:16px;padding:14px;overflow:auto;max-height:260px;font-size:12px;line-height:1.55}}
 </style>
 <div class='eq-wrap'><div class='eq-hero'><h2>地震事件資訊</h2><p>{esc(location)}</p></div><div class='eq-grid'>{card_html}</div></div>
+"""
+
+
+def event_text_html(payload, event, source_label):
+    parsed = json.dumps(event or {}, ensure_ascii=False, indent=2)
+    keys = list(payload.keys()) if isinstance(payload, dict) else []
+    return f"""
+<div style='display:grid;gap:10px;margin-top:12px'>
+  <div style='font-weight:900;color:#0f172a'>事件文字資訊</div>
+  <div style='color:#64748b;font-size:13px'>來源：{esc(EVENT_DATASET_ID)}/{esc(source_label)}；Top-level keys：{esc(', '.join(keys[:12]))}</div>
+  <pre class='event-pre'>{esc(parsed)}</pre>
+</div>
 """
 
 
@@ -421,15 +463,16 @@ def folium_map_html(event):
     return f"<iframe srcdoc=\"{html.escape(map_html, quote=True)}\" style=\"width:100%;height:560px;border:0;border-radius:18px;box-shadow:0 8px 22px rgba(15,23,42,.08);\"></iframe>"
 
 
-def render_event():
+def render_event(source):
     try:
-        payload, label = load_event_status()
+        payload, label = load_event_status(source)
     except Exception as exc:
         with open(FIXTURES / "normal_event.json", "r", encoding="utf-8") as f:
             payload = json.load(f)
         label = f"fallback: {exc}"
     event = event_from_payload(payload)
-    return event_info_html(event, f"{EVENT_DATASET_ID}/{label}"), folium_map_html(event)
+    info = event_info_html(event, f"{EVENT_DATASET_ID}/{label}") + event_text_html(payload, event, label)
+    return info, folium_map_html(event)
 
 
 def render_waveform_image():
@@ -455,9 +498,10 @@ def render_waveform_image():
 
 
 status_opts = status_choices()
+event_opts = event_status_choices()
 
 with gr.Blocks(title="EEW Dashboard") as demo:
-    gr.Markdown("# EEW Dashboard\n系統狀態、地震事件與靜態波形儀表板。地震事件資料讀取 `oceanicdayi/eew_hermes_dashboard/status/eew_status_report.json`；波形圖讀取 `tsmip/tsmip_hlz_3min_clusters.png`。")
+    gr.Markdown("# EEW Dashboard\n系統狀態、地震事件與靜態波形儀表板。地震事件資料可選擇 `oceanicdayi/eew_hermes_dashboard/status/` 內的 JSON 檔；波形圖讀取 `tsmip/tsmip_hlz_3min_clusters.png`。")
     with gr.Tab("系統狀態"):
         with gr.Row():
             s = gr.Dropdown(choices=status_opts, value=status_opts[0], label="Status file")
@@ -470,17 +514,22 @@ with gr.Blocks(title="EEW Dashboard") as demo:
         s.change(render_status, inputs=s, outputs=lights)
         demo.load(render_status, inputs=s, outputs=lights)
     with gr.Tab("地震事件"):
-        em = gr.Markdown(f"事件資料來源：`{EVENT_DATASET_ID}/{EVENT_STATUS_PATH}`")
-        el = gr.Button("載入事件")
+        with gr.Row():
+            es = gr.Dropdown(choices=event_opts, value=event_opts[0], label="Event status file")
+            er = gr.Button("重新讀取事件清單")
+            el = gr.Button("載入事件")
+        em = gr.Markdown(f"事件資料來源：`{EVENT_DATASET_ID}/{EVENT_STATUS_PREFIX}`")
         event_info = gr.HTML()
-        event_map = gr.HTML(label="Folium earthquake map")
-        el.click(render_event, outputs=[event_info, event_map])
-        demo.load(render_event, outputs=[event_info, event_map])
+        event_map = gr.HTML()
+        er.click(refresh_event_files, outputs=[es, em])
+        el.click(render_event, inputs=es, outputs=[event_info, event_map])
+        es.change(render_event, inputs=es, outputs=[event_info, event_map])
+        demo.load(render_event, inputs=es, outputs=[event_info, event_map])
     with gr.Tab("靜態波形"):
         wm = gr.Markdown(f"波形圖來源：`{WAVEFORM_DATASET_ID}/{WAVEFORM_IMAGE_PATH}`")
         wp = gr.Button("載入波形圖")
         wave_msg = gr.Markdown()
-        wave_img = gr.HTML(label="TSMIP HLZ 3-minute clusters")
+        wave_img = gr.HTML()
         wp.click(render_waveform_image, outputs=[wave_msg, wave_img])
         demo.load(render_waveform_image, outputs=[wave_msg, wave_img])
 
