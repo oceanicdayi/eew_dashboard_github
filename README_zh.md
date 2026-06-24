@@ -2,6 +2,8 @@
 
 > 台灣地震預警（EEW）系統狀態暨資料視覺化儀表板，透過 GitHub Actions 自動部署至 Hugging Face Spaces。
 
+**GitHub Pages：** https://oceanicdayi.github.io/eew_dashboard_github/
+
 ---
 
 ## 目錄

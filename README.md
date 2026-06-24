@@ -1,5 +1,7 @@
 # EEW Dashboard GitHub Deploy
 
+**GitHub Pages：** https://oceanicdayi.github.io/eew_dashboard_github/
+
 This repository contains a deployable Gradio dashboard for replaying Taiwan EEW fixture data and publishing the app to Hugging Face Spaces through GitHub Actions.
 
 ## Files
